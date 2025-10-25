@@ -1,0 +1,8 @@
+# Ignore everything
+*
+
+# But not this file
+!main.py
+
+# Optional: still ignore the .gitignore itself if you wish to commit it too
+!.gitignore

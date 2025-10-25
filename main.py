@@ -80,7 +80,7 @@ class DraftState:
     queue: List[int] = field(default_factory=list)
     readycheck_active: bool = False
     ready_users: Set[int] = field(default_factory=set)
-    fake_users: Set[int] = field(default_factory=set)
+    #fake_users: Set[int] = field(default_factory=set)
     ready_task: Optional[asyncio.Task] = None
     draft_active: bool = False
     captains: Tuple[int, int] | None = None
@@ -1149,7 +1149,7 @@ async def reset_cmd(interaction: discord.Interaction):
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
     
-@bot.tree.command(name="filltest", description="(Testi) täytä jono feikkipelaajilla; readycheck oikeille ja kapteenit oikeista")
+"""@bot.tree.command(name="filltest", description="(Testi) täytä jono feikkipelaajilla; readycheck oikeille ja kapteenit oikeista")
 async def filltest_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
@@ -1192,7 +1192,7 @@ async def filltest_cmd(interaction: discord.Interaction):
         )
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
-
+"""
 # -----------------------------
 # Käynnistys :3
 # -----------------------------

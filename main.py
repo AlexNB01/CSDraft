@@ -553,7 +553,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
         names1 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team1 ]
         names2 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team2 ]
 
-        emb = discord.Embed(title="Selected teams", color=EMBED_COLOR_PRIMARY)
+        emb = discord.Embed(title="Valitut joukkueet", color=EMBED_COLOR_PRIMARY)
         emb.add_field(name="Team1:", value=("\n".join(names1) if names1 else "-"), inline=True)
         emb.add_field(name="Team2:", value=("\n".join(names2) if names2 else "-"), inline=True)
         emb.set_footer(text="CSDraft by Alex")

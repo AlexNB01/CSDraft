@@ -1,5 +1,4 @@
-# Ignore everything
+# Ignoraa kaikki
 *
-
-# But not this file
+# paitsi tää
 !main.py

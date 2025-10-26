@@ -1,4 +1,5 @@
 # Ignoraa kaikki
 *
-# paitsi tää
+# paitsi nää
 !main.py
+!launch.bat

@@ -341,7 +341,7 @@ class DraftBot(commands.Bot):
         intents = discord.Intents.default()
         intents.members = False
         intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=intents, case_insensitive=True)
         self.db = DB()
         self.states: Dict[int, DraftState] = {}  # key: guild_id
 
@@ -578,7 +578,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
         await interaction.followup.send(
             content=(
                 f"**Draft valmis!** Pelin ID: `{game_id}`\n"
-                f"Aseta voittaja: `/setwinner {game_id} 1` tai `/setwinner {game_id} 2`."
+                f"Aseta voittaja: `!setwinner {game_id} 1` tai `!setwinner {game_id} 2`."
             ),
             embed=emb
         )
@@ -681,7 +681,7 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
             rem = remaining()
 
             # päivitä/näytä viesti
-            text = f"⏳ Readycheck: **{rem}s** aikaa jäljellä… Kirjoita **/r**!"
+            text = f"⏳ Readycheck: **{rem}s** aikaa jäljellä… Kirjoita **!r**!"
             if st.rc_timer_msg is None:
                 try:
                     st.rc_timer_msg = await interaction.followup.send(text, ephemeral=False)
@@ -817,7 +817,7 @@ async def add_cmd(interaction: discord.Interaction):
         await interaction.followup.send(
             f"**Jonossa 10 pelaajaa!** Readycheck alkaa nyt ({READYCHECK_SECONDS}s).\n"
             f"{mentions}\n"
-            f"Kirjoittakaa **/r** ollaksenne mukana seuraavassa pelissä!."
+            f"Kirjoittakaa **!r** ollaksenne mukana seuraavassa pelissä!."
         )
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
@@ -917,11 +917,15 @@ async def start_draft(interaction: discord.Interaction):
         lines.append(f"{st.number_by_uid[u]} - {disp}")
     valittavat_block = "```\n" + "\n".join(lines) + "\n```" if lines else "```\n(ei valittavia)\n```"
 
+    cap1_name = await get_display_name(interaction, st.captains[0])
+    cap2_name = await get_display_name(interaction, st.captains[1])
+
     header = (
         f"Readycheck valmis, siirrytään draftiin! Ensimmäisen valinnan tekee: **{first_turn_label}**\n\n"
-        f"• Team 1 Kapteeni: {mention(st.captains[0])}\n"
-        f"• Team 2 Kapteeni: {mention(st.captains[1])}\n"
+        f"• Team 1 Kapteeni: {cap1_name}\n"
+        f"• Team 2 Kapteeni: {cap2_name}\n"
     )
+
 
     await interaction.followup.send(header, ephemeral=False)
     await announce_next_picker(interaction, st)
@@ -1257,7 +1261,7 @@ async def filltest_cmd(interaction: discord.Interaction):
 
 
 # !add
-@bot.command(name="add")
+@bot.command(name="add", aliases=["dad", "bad", "ad"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await add_cmd.callback(interaction)
@@ -1287,7 +1291,7 @@ async def pstats_bang(ctx: commands.Context, user: Optional[discord.Member] = No
     interaction = InteractionShim(ctx)
     await pstats_cmd.callback(interaction, user or ctx.author)
 
-@bot.command(name="pick")
+@bot.command(name="pick", aliases=["p"])
 async def pick_bang(ctx: commands.Context, number: int):
     interaction = InteractionShim(ctx)
     await pick_cmd.callback(interaction, number)

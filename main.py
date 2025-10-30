@@ -235,6 +235,44 @@ class DB:
                 await db.commit()
                 return team1, team2
 
+    async def set_draw(self, game_id: int, overwrite: bool = False) -> Tuple[List[int], List[int]]:
+        """
+        Merkitse peli tasapeliksi (winner=0).
+        - Jos peliin on jo merkitty voittaja (1/2):
+            - overwrite=False -> virhe
+            - overwrite=True  -> poistetaan vanhan voittajatiimin voitoista -1 / pelaaja
+        Palauttaa (team1, team2).
+        """
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                cur = await db.execute("SELECT team1, team2, winner FROM games WHERE id=?", (game_id,))
+                row = await cur.fetchone()
+                if not row:
+                    raise ValueError("Peliä ei löytynyt tällä ID:llä.")
+
+                team1 = json.loads(row[0])
+                team2 = json.loads(row[1])
+                previous_winner = row[2]
+
+                if previous_winner is None:
+                    await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
+                    await db.commit()
+                    return team1, team2
+
+                if previous_winner in (1, 2):
+                    if not overwrite:
+                        raise ValueError("Tälle pelille on jo asetettu voittaja.")
+                    prev_winners = team1 if previous_winner == 1 else team2
+                    for uid in prev_winners:
+                        await db.execute("UPDATE players SET wins = wins - 1 WHERE user_id = ?", (uid,))
+                    await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
+                    await db.commit()
+                    return team1, team2
+
+                # Oli jo tasapeli (winner=0)
+                await db.commit()
+                return team1, team2
+
 
     async def get_player(self, user_id: int) -> Optional[dict]:
         async with aiosqlite.connect(self.path) as db:
@@ -865,8 +903,6 @@ async def r_cmd(interaction: discord.Interaction):
 
     await start_draft(interaction)
 
-
-
 async def start_draft(interaction: discord.Interaction):
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
@@ -992,36 +1028,22 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
     # Seuraava vuoro tai draftin päätös
     await _finish_or_next(interaction, st)
 
-
-@bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2)")
-@app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1 tai 2)")
+@bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2; 0=tasan)")
+@app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")
 async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: int):
-    # Tarkista voittajan numero
-    if winner not in (1, 2):
-        return await interaction.response.send_message("Virhe: voittajan tulee olla **1** (team1) tai **2** (team2).", ephemeral=True)
+    overwrite = (interaction.user.id == 97687348396953600)  # sinulla ylikirjoitusoikeus
 
-    # Hae peli
-    game = await bot.db.get_game(game_id)
-    if not game:
-        return await interaction.response.send_message("Peliä ei löytynyt annetulla ID:llä.", ephemeral=True)
-
-    # Oletus: ei ylikirjoitusta
-    overwrite = False
-
-    # Meitsillä oikeus ylikirjottaa :3
-    if interaction.user.id == 97687348396953600:
-        overwrite = True
-
-    # Päivitä tietokanta
     try:
-        team1, team2 = await bot.db.set_winner(game_id, winner, overwrite=overwrite)
+        if winner == 0:
+            await bot.db.set_draw(game_id, overwrite=overwrite)
+            await interaction.response.send_message(f"Tasapeli tallennettu pelille `{game_id}`.")
+        elif winner in (1, 2):
+            await bot.db.set_winner(game_id, winner, overwrite=overwrite)
+            await interaction.response.send_message(f"Voittaja (team {winner}) tallennettu pelille `{game_id}`.")
+        else:
+            await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
     except ValueError as e:
-        return await interaction.response.send_message(str(e), ephemeral=True)
-
-    # Ota varmistus
-    await backup_db()
-
-    await interaction.response.send_message(f"Pelin `{game_id}` voittajaksi asetettu **team{winner}**.")
+        await interaction.response.send_message(str(e), ephemeral=True)
 
 @setwinner_cmd.autocomplete("game_id")
 async def setwinner_game_id_autocomplete(interaction: discord.Interaction, current: str):
@@ -1030,6 +1052,10 @@ async def setwinner_game_id_autocomplete(interaction: discord.Interaction, curre
         ids = [gid for gid in ids if str(gid).startswith(current)]
     return [app_commands.Choice(name=f"Peli {gid}", value=gid) for gid in ids]
 
+@bot.tree.command(name="setdraw", description="Merkitse peli tasapeliksi (winner=0)")
+async def setdraw_cmd(interaction: discord.Interaction, game_id: int):
+    # ohjaa samaan logiikkaan kuin setwinner (winner=0)
+    await setwinner_cmd.callback(interaction, game_id, 0)
 
 @bot.tree.command(name="pstats", description="Näytä pelaajan tilastot ja sijoitukset embedinä")
 @app_commands.describe(user="Valinnainen: käyttäjä, jonka tilastoja katsotaan")
@@ -1117,8 +1143,6 @@ async def ds_cmd(interaction: discord.Interaction):
     embed.set_footer(text="CSDraft by Alex")
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
-
-
 @bot.tree.command(name="top10", description="Eniten pelejä pelanneet (Top 10)")
 async def top10_cmd(interaction: discord.Interaction):
     rows = await bot.db.leaderboard("games_played", 10)
@@ -1135,21 +1159,40 @@ async def top10_cmd(interaction: discord.Interaction):
     emb.set_footer(text=EMBED_FOOTER_TEXT)
     await interaction.response.send_message(embed=emb)
 
-@bot.tree.command(name="winners", description="Eniten pelejä voittaneet (Top 10)")
+@bot.tree.command(name="winners", description="Näytä eniten pelejä voittaneet pelaajat (Top 10)")
 async def winners_cmd(interaction: discord.Interaction):
-    rows = await bot.db.leaderboard("wins", 10)
-    if not rows:
-        return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
+    """Näyttää Top 10 pelaajat voittojen ja voittoprosentin mukaan (tasatilanteet ratkaistaan WR:llä)."""
+    async with aiosqlite.connect(bot.db.path) as db:
+        cur = await db.execute("SELECT user_id, wins, games_played FROM players")
+        players = await cur.fetchall()
 
-    lines = []
-    for i, (uid, wins, gp, _) in enumerate(rows, start=1):
+    if not players:
+        await interaction.response.send_message("Tietokannassa ei ole vielä pelaajia.", ephemeral=True)
+        return
+
+    rows = []
+    for uid, wins, games in players:
         name = await get_display_name(interaction, uid)
-        wr = (wins / gp * 100) if gp else 0.0
-        lines.append(f"{i}. {name} / {wins} ({wr:.1f}%)")
+        wr = (wins / games * 100.0) if games > 0 else 0.0
+        rows.append((name, wins, games, wr))
 
-    emb = discord.Embed(title="Eniten pelejä voittaneet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
-    emb.set_footer(text=EMBED_FOOTER_TEXT)
-    await interaction.response.send_message(embed=emb)
+    # Lajittelu: ensin voitot, sitten WR, lopuksi nimi
+    rows.sort(key=lambda r: (-r[1], -r[3], r[0].lower()))
+
+    top = rows[:10]
+    lines = [
+        f"{i}. {name} / {wins} ({wr:.1f}%)"
+        for i, (name, wins, games, wr) in enumerate(top, start=1)
+    ]
+
+    embed = discord.Embed(
+        title="Eniten pelejä voittaneet (Top 10)",
+        description="\n".join(lines),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text="CSDraft by Alex")
+
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="captains", description="Eniten kapteenina toimineet (Top 10)")
 async def captains_cmd(interaction: discord.Interaction):
@@ -1307,7 +1350,8 @@ async def top10_bang(ctx: commands.Context):
 
 @bot.command(name="winners")
 async def winners_bang(ctx: commands.Context):
-    await winners_cmd.callback(InteractionShim(ctx))
+    interaction = InteractionShim(ctx)
+    await winners_cmd.callback(interaction)
 
 @bot.command(name="captains")
 async def captains_bang(ctx: commands.Context):
@@ -1320,6 +1364,13 @@ async def thinkids_bang(ctx: commands.Context):
 @bot.command(name="fatkids")
 async def fatkids_bang(ctx: commands.Context):
     await fatkids_cmd.callback(InteractionShim(ctx))
+    
+@bot.command(name="setdraw", aliases=["sd"])
+async def setdraw_bang(ctx: commands.Context, game_id: int = None):
+    if game_id is None:
+        return await ctx.reply("Käyttö: `!setdraw <peli_id>`")
+    await setwinner_cmd.callback(InteractionShim(ctx), game_id, 0)
+
 # -----------------------------
 # Käynnistys :3
 # -----------------------------

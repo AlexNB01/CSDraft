@@ -18,13 +18,13 @@ from discord.ext import commands
 # Configi :3
 # -----------------------------
 QUEUE_SIZE = 10
-READYCHECK_SECONDS = 60
+READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
 
 
 # ---- UI: värit ja footer ----
-EMBED_COLOR_PRIMARY = 0x6B4EFF
+EMBED_COLOR_PRIMARY = 0x29377e
 EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 
 def build_stats_embed(
@@ -188,12 +188,6 @@ class DB:
                 return cur.lastrowid
 
     async def set_winner(self, game_id: int, winner_team: int, overwrite: bool = False) -> Tuple[List[int], List[int]]:
-        """
-        Aseta voittaja. Jos overwrite=True ja peliin on jo merkitty voittaja,
-        muutetaan tulosta: vanhalta voittajatiimiltä vähennetään 1 voitto / pelaaja
-        ja uudelta voittajatiimiltä lisätään 1 voitto / pelaaja.
-        Palauttaa (team1, team2) listat.
-        """
         if winner_team not in (1, 2):
             raise ValueError("Voittajan tulee olla 1 tai 2.")
 
@@ -236,13 +230,6 @@ class DB:
                 return team1, team2
 
     async def set_draw(self, game_id: int, overwrite: bool = False) -> Tuple[List[int], List[int]]:
-        """
-        Merkitse peli tasapeliksi (winner=0).
-        - Jos peliin on jo merkitty voittaja (1/2):
-            - overwrite=False -> virhe
-            - overwrite=True  -> poistetaan vanhan voittajatiimin voitoista -1 / pelaaja
-        Palauttaa (team1, team2).
-        """
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 cur = await db.execute("SELECT team1, team2, winner FROM games WHERE id=?", (game_id,))
@@ -309,7 +296,6 @@ class DB:
             return await cur.fetchall()
             
     async def get_game(self, game_id: int) -> Optional[dict]:
-        """Palauta pelin tiedot: team1, team2, winner (tai None jos ei löydy)."""
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 "SELECT id, guild_id, team1, team2, winner FROM games WHERE id=?",
@@ -327,11 +313,6 @@ class DB:
             }
             
     async def get_rank(self, field: str, user_id: int) -> int:
-        """
-        Palauta pelaajan sijoitus (1=paras).
-        - Jos arvo == 0  -> näytetään viimeinen sijoitus (kaikille nollissa oleville sama numero).
-        - Muuten         -> dense ranking: 1 + count(>arvo).
-        """
         valid = {"games_played", "wins", "captain_count", "first_pick_count", "last_pick_count"}
         if field not in valid:
             raise ValueError("Tuntematon kenttä rankille")
@@ -433,9 +414,8 @@ async def announce_next_picker(interaction: discord.Interaction, st: DraftState,
     team = st.pick_order[st.pick_index]
     captain = st.captains[0] if team == "team1" else st.captains[1]
 
-    # Yhdistä viime valinnan ilmoitus alkuun (jos annettu tai tallessa)
     head = prefix if prefix is not None else (st.last_pick_prefix or "")
-    st.last_pick_prefix = None  # tyhjennä käytön jälkeen
+    st.last_pick_prefix = None
     if head and not head.endswith("\n"):
         head += "\n"
 
@@ -455,21 +435,17 @@ async def announce_next_picker(interaction: discord.Interaction, st: DraftState,
     else:
         st.pick_msg = await interaction.followup.send(content, ephemeral=False)
 
-    # Käynnistä tai nollaa ajastin ja näytä se heti
     await start_pick_timer(interaction, st)
 
 
 async def start_pick_timer(interaction: discord.Interaction, st: DraftState):
-    """Käynnistä countdown heti näkyvällä timer-viestillä (1s päivitys). Vain uusin seq elää."""
     st.pick_timer_seq = getattr(st, "pick_timer_seq", 0) + 1
     my_seq = st.pick_timer_seq
 
-    # Sammuta edellinen task
     if st.pick_timer_task and not st.pick_timer_task.done():
         st.pick_timer_task.cancel()
     st.pick_timer_task = None
 
-    # Poista edellinen timer-viesti
     if st.timer_msg:
         try:
             await st.timer_msg.delete()
@@ -477,13 +453,11 @@ async def start_pick_timer(interaction: discord.Interaction, st: DraftState):
             pass
         st.timer_msg = None
 
-    # Aseta deadline ja luo ENSIMMÄINEN viesti aina kanavaan (ei followup)
     st.pick_deadline_ts = asyncio.get_running_loop().time() + PICK_TIMEOUT_SECONDS
     text = f"⏳ **{PICK_TIMEOUT_SECONDS}s** aikaa valita…"
     if interaction.channel:
         st.timer_msg = await interaction.channel.send(text)
 
-    # Käynnistä taski, joka tietää oman seq:nsä
     st.pick_timer_task = asyncio.create_task(_run_pick_countdown(interaction, st, my_seq))
 
 
@@ -503,11 +477,11 @@ async def _run_pick_countdown(interaction: discord.Interaction, st: DraftState, 
             now = loop.time()
             return int(max(0, (st.pick_deadline_ts or now) - now))
 
-        recreated_once = False  # estää duplikaatit
+        recreated_once = False
 
         while st.draft_active and st.pick_index < len(st.pick_order):
             if getattr(st, "pick_timer_seq", 0) != seq:
-                return  # vain uusin taski saa elää
+                return
 
             rem = remaining()
 
@@ -515,14 +489,12 @@ async def _run_pick_countdown(interaction: discord.Interaction, st: DraftState, 
                 try:
                     await st.timer_msg.edit(content=f"⏳ **{rem}s** aikaa valita…")
                 except Exception:
-                    # poista roikkuva viesti
                     try:
                         await st.timer_msg.delete()
                     except Exception:
                         pass
                     st.timer_msg = None
 
-            # Jos viesti puuttuu (edit epäonnistui), luo KERRAN uusi (vain uusin seq)
             if st.timer_msg is None and not recreated_once and interaction.channel and rem > 0 and st.pick_timer_seq == seq:
                 st.timer_msg = await interaction.channel.send(f"⏳ **{rem}s** aikaa valita…")
                 recreated_once = True
@@ -531,7 +503,6 @@ async def _run_pick_countdown(interaction: discord.Interaction, st: DraftState, 
                 break
             await asyncio.sleep(1)
 
-        # Aika loppui → autopick (vain jos tämä taski on yhä uusin)
         if st.draft_active and st.pick_index < len(st.pick_order) and st.pick_pool and getattr(st, "pick_timer_seq", 0) == seq:
             uid = random.choice(st.pick_pool)
             await _apply_pick(interaction, st, uid, is_autopick=True)
@@ -549,23 +520,19 @@ async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int
     current_team = st.pick_order[st.pick_index]
     target_team = st.team1 if current_team == "team1" else st.team2
 
-    # lisää joukkueeseen
     if uid in st.pick_pool:
         target_team.append(uid)
         st.pick_pool.remove(uid)
 
-    # tilasto: eka pick
     if st.pick_index == 0:
         await bot.db.bump_first_last(uid, first=True)
 
     st.pick_index += 1
 
-    # Rakenna seuraavan vuoron prefiksi
     team_num = 1 if current_team == "team1" else 2
     picked_name = f"test-{uid % 1000000}" if uid in st.fake_users else await get_display_name(interaction, uid)
     st.last_pick_prefix = f"Pelaaja {picked_name} lisätty tiimiin {team_num}."
 
-    # Siivoa timer-viesti (molemmissa tapauksissa)
     if st.timer_msg:
         try:
             await st.timer_msg.delete()
@@ -573,38 +540,30 @@ async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int
             pass
         st.timer_msg = None
 
-    # Manuaalinen pick: pysäytä käynnissä ollut countdown-task
     if not is_autopick and st.pick_timer_task and not st.pick_timer_task.done():
         st.pick_timer_task.cancel()
     st.pick_timer_task = None
 
-    # Aina uusi 'Seuraava vuoro' -viesti ja timer, jos draft jatkuu
     if st.pick_index < len(st.pick_order):
-        st.pick_msg = None  # pakota uuden viestin luonti
+        st.pick_msg = None
         await _finish_or_next(interaction, st)
         return
 
-    # Muuten: draft päättyi → hoidetaan viimeinen pelaaja, tallennus ja embed
     await _finish_or_next(interaction, st)
 
 
 async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
-    # Kaikki pickit tehty?
     if st.pick_index >= len(st.pick_order):
-        # Jos yksi vielä jäljellä, se menee Team1:lle
         if len(st.pick_pool) == 1:
             last_uid = st.pick_pool.pop()
             st.team1.append(last_uid)
             await bot.db.bump_first_last(last_uid, last=True)
 
-        # Tallenna peli
         game_id = await bot.db.record_game(interaction.guild_id, st.team1, st.team2)
         st.game_id = game_id
 
-        # DB-varmistus
         await backup_db()
 
-        # Rakenna nimet ilman tägäyksiä
         names1 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team1 ]
         names2 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team2 ]
 
@@ -621,7 +580,6 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
             embed=emb
         )
 
-        # Siivoa tila
         drafted = set(st.team1 + st.team2)
         st.queue = [u for u in st.queue if u not in drafted]
         st.draft_active = False
@@ -629,8 +587,8 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
         st.team1.clear(); st.team2.clear(); st.pick_pool.clear()
         st.pick_index = 0
         st.number_by_uid.clear()
+        st.last_pick_prefix = None 
 
-        # Pysäytä ja poista mahdolliset viestit/taskit
         if st.pick_timer_task and not st.pick_timer_task.done():
             st.pick_timer_task.cancel()
         st.pick_timer_task = None
@@ -643,8 +601,6 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
         st.pick_msg = None
         return
 
-    # --- Seuraava vuoro ---
-    # Varmista ettei edellisen vuoron timer roiku
     if st.pick_timer_task and not st.pick_timer_task.done():
         st.pick_timer_task.cancel()
     st.pick_timer_task = None
@@ -655,12 +611,10 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
             pass
     st.timer_msg = None
 
-    # Luo seuraavan vuoron viesti (mukana mahdollinen st.last_pick_prefix) ja käynnistä uusi timer
     await announce_next_picker(interaction, st)
 
 
 async def backup_db(keep: int = 10):
-    """Kopioi SQLite-tietokanta backups/-kansioon ja karsii vanhat varmistukset."""
     src = bot.db.path
     os.makedirs("backups", exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -677,11 +631,8 @@ async def backup_db(keep: int = 10):
             pass
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
-    """Käynnistä readycheckin countdown. Viesti tulee näkyviin vasta kun aikaa on ≤ 15s."""
-    # sammuta vanha RC-timer
     if st.rc_timer_task and not st.rc_timer_task.done():
         st.rc_timer_task.cancel()
-    # poista vanha viesti
     if st.rc_timer_msg:
         try:
             await st.rc_timer_msg.delete()
@@ -694,7 +645,6 @@ async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
 
 
 async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState):
-    """Näytä viesti, kun aikaa ≤ 15s; päivitä 1s välein; poista kun päättyy."""
     try:
         loop = asyncio.get_running_loop()
 
@@ -702,23 +652,18 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
             now = loop.time()
             return int(max(0, (st.rc_deadline_ts or now) - now))
 
-        # Odota, kunnes aikaa on ≤ 15s tai readycheck päättyy
         while st.readycheck_active:
             rem = remaining()
             if rem <= 15:
                 break
-            # nukutaan kerralla rem-15 sekuntia (min 0.5s safetyna)
             await asyncio.sleep(max(0.5, rem - 15))
 
-        # Jos readycheck ehti päättyä, lopeta hiljaa
         if not st.readycheck_active:
             return
 
-        # Luo viesti ja päivitä sitä sekunnin välein
         for _ in range(1000):
             rem = remaining()
 
-            # päivitä/näytä viesti
             text = f"⏳ Readycheck: **{rem}s** aikaa jäljellä… Kirjoita **!r**!"
             if st.rc_timer_msg is None:
                 try:
@@ -730,7 +675,6 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
                 try:
                     await st.rc_timer_msg.edit(content=text)
                 except Exception:
-                    # jos edit epäonnistui, yritetään luoda uusi
                     if interaction.channel:
                         st.rc_timer_msg = await interaction.channel.send(text)
 
@@ -738,7 +682,6 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
                 break
             await asyncio.sleep(1)
 
-        # Valmistuminen tai aika loppui -> siivoa viesti
         if st.rc_timer_msg:
             try:
                 await st.rc_timer_msg.delete()
@@ -747,7 +690,6 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
             st.rc_timer_msg = None
 
     except asyncio.CancelledError:
-        # peruttu siististi -> poista viesti jos on
         if st.rc_timer_msg:
             try:
                 await st.rc_timer_msg.delete()
@@ -763,7 +705,6 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
         if not st.readycheck_active:
             return
 
-        # Siivoa ready-timer (viesti+task)
         if st.rc_timer_task and not st.rc_timer_task.done():
             st.rc_timer_task.cancel()
         st.rc_timer_task = None
@@ -781,10 +722,9 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
         if puuttuvat:
             nimet = [await get_display_name(interaction, u) for u in puuttuvat]
             await interaction.followup.send(
-                "⏰ Readycheck päättyi aikarajaan.\n"
+                "Readycheck päättyi aikarajaan.\n"
                 "Seuraavat eivät vahvistaneet ja poistettiin jonosta: " + ", ".join(nimet)
             )
-            # Poistetaan puuttuvat pelaajat jonosta
             st.queue = [u for u in st.queue if u in st.ready_users]
         else:
             await interaction.followup.send("⏰ Readycheck päättyi.")
@@ -793,7 +733,6 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
 
 
     except asyncio.CancelledError:
-        # Siivoa myös peruutuksessa
         if st.rc_timer_task and not st.rc_timer_task.done():
             st.rc_timer_task.cancel()
         st.rc_timer_task = None
@@ -806,7 +745,6 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
         return
 
 class InteractionShim:
-    """Siltaluokka: muuntaa prefix-Contextin (ctx) Interaction-tyyppiseksi rajapinnaksi."""
     def __init__(self, ctx: commands.Context):
         self._ctx = ctx
         self.guild = ctx.guild
@@ -816,11 +754,9 @@ class InteractionShim:
 
         class _Resp:
             async def send_message(_, content=None, *, embed=None, ephemeral=False):
-                # Ephemeral ei ole mahdollinen viesteissä -> ohitetaan
                 await ctx.reply(content or "", embed=embed)
 
             async def defer(_, thinking=False):
-                # Ei tarvitse tehdä mitään prefix-komennoissa
                 pass
 
 
@@ -907,17 +843,27 @@ async def start_draft(interaction: discord.Interaction):
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
 
-    # Estä kaksoiskäynnistys ja varmistu pelaajamäärästä
     if st.draft_active:
         return
     if len(st.queue) < QUEUE_SIZE:
         return await interaction.followup.send("Liian vähän pelaajia draftiin.")
 
-    # Nollaa readycheck ja aloita draft
     st.readycheck_active = False
     st.ready_users.clear()
 
-    # Arvo kapteenit: suosi oikeita käyttäjiä jos mahdollista
+    st.last_pick_prefix = None
+    st.pick_msg = None
+    if st.pick_timer_task and not st.pick_timer_task.done():
+        st.pick_timer_task.cancel()
+    st.pick_timer_task = None
+
+    if st.timer_msg:
+        try:
+            await st.timer_msg.delete()
+        except Exception:
+            pass
+    st.timer_msg = None
+
     pool = st.queue[:QUEUE_SIZE]
     random.shuffle(pool)
     real_pool = [u for u in pool if u not in st.fake_users]
@@ -929,24 +875,18 @@ async def start_draft(interaction: discord.Interaction):
     st.captains = (c1, c2)
     st.team1 = [c1]
     st.team2 = [c2]
-    # Päivitä kapteenitilastot tietokantaan
     await bot.db.bump_captain(c1)
     await bot.db.bump_captain(c2)
 
-
-    # Valittavat pelaajat = kaikki muut kuin kapteenit
-    st.pick_pool = [u for u in pool if u not in {c1, c2}] # kapteenit ovat pool[0] ja pool[1]
+    st.pick_pool = [u for u in pool if u not in {c1, c2}]
     st.pick_index = 0
     st.draft_active = True
 
-    # Numeroi valittavat (1–8)
     st.number_by_uid = {uid: i + 1 for i, uid in enumerate(st.pick_pool)}
 
-    # Kumpi aloittaa
     first_turn_team = st.pick_order[st.pick_index] if st.pick_index < len(st.pick_order) else "team1"
     first_turn_label = "Team 1" if first_turn_team == "team1" else "Team 2"
 
-    # Rakennetaan yksi aloitusviesti (SUOMEKSI): kapteenit + ohje + valittavat
     lines = []
     for u in st.pick_pool:
         disp = await get_display_name(interaction, u) if u not in st.fake_users else f"test-{u % 1000000}"
@@ -975,13 +915,11 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
     if st.pick_index >= len(st.pick_order):
         return await interaction.response.send_message("Kaikki pelaajat on jo valittu.", ephemeral=True)
 
-    # Vain oikea kapteeni voi valita
     team = st.pick_order[st.pick_index]
     expected_captain = st.captains[0] if team == "team1" else st.captains[1]
     if interaction.user.id != expected_captain:
         return await interaction.response.send_message("Ei ole sinun vuorosi valita.", ephemeral=True)
 
-    # Tarkistetaan valinnan numero
     uid = None
     for k, v in st.number_by_uid.items():
         if v == number:
@@ -992,23 +930,19 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
 
     await interaction.response.defer(thinking=False)
 
-    # Lisää pelaaja oikeaan joukkueeseen
     target_team = st.team1 if team == "team1" else st.team2
     target_team.append(uid)
     st.pick_pool.remove(uid)
 
-    # Tilastot
     if st.pick_index == 0:
         await bot.db.bump_first_last(uid, first=True)
 
     st.pick_index += 1
 
-    # Pysäytä countdown-task tarvittaessa
     if st.pick_timer_task and not st.pick_timer_task.done():
         st.pick_timer_task.cancel()
     st.pick_timer_task = None
 
-    # Poista KAIKKI mahdolliset timer-viestit luotettavasti
     if st.timer_msg:
         try:
             await st.timer_msg.delete()
@@ -1016,22 +950,18 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
             pass
     st.timer_msg = None
 
-
-    # Seuraavalla vuorolla tehdään uusi 'Seuraava vuoro' -viesti
     st.pick_msg = None
 
-    # Ilmoita valinnasta ja rakenna seuraavan vuoron prefiksi
     team_num = 1 if team == "team1" else 2
     name = f"test-{uid % 1000000}" if uid in st.fake_users else await get_display_name(interaction, uid)
     st.last_pick_prefix = f"Pelaaja {name} lisätty tiimiin {team_num}."
     
-    # Seuraava vuoro tai draftin päätös
     await _finish_or_next(interaction, st)
 
 @bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2; 0=tasan)")
 @app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")
 async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: int):
-    overwrite = (interaction.user.id == 97687348396953600)  # sinulla ylikirjoitusoikeus
+    overwrite = (interaction.user.id == 97687348396953600)
 
     try:
         if winner == 0:
@@ -1054,7 +984,6 @@ async def setwinner_game_id_autocomplete(interaction: discord.Interaction, curre
 
 @bot.tree.command(name="setdraw", description="Merkitse peli tasapeliksi (winner=0)")
 async def setdraw_cmd(interaction: discord.Interaction, game_id: int):
-    # ohjaa samaan logiikkaan kuin setwinner (winner=0)
     await setwinner_cmd.callback(interaction, game_id, 0)
 
 @bot.tree.command(name="pstats", description="Näytä pelaajan tilastot ja sijoitukset embedinä")
@@ -1069,7 +998,6 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
     w  = data["wins"]
     wr = (w / gp * 100) if gp else 0.0
 
-    # Sijoitukset + kokonaismäärä
     total_players = await bot.db.count_players()
     r_games   = await bot.db.get_rank("games_played",     target.id)
     r_wins    = await bot.db.get_rank("wins",             target.id)
@@ -1099,7 +1027,6 @@ async def ds_cmd(interaction: discord.Interaction):
 
     embed = discord.Embed(title="Draftin tila", color=discord.Color.blurple())
 
-    # Jos readycheck käynnissä → näytetään vain pelaajat, jotka eivät ole vielä valmiina
     if st.readycheck_active:
         not_ready = [u for u in st.queue if u not in st.ready_users]
         if not_ready:
@@ -1116,7 +1043,6 @@ async def ds_cmd(interaction: discord.Interaction):
                 inline=False,
             )
 
-    # Jos draft on käynnissä → näytetään joukkueet
     elif st.draft_active:
         t1_names = [await get_display_name(interaction, u) for u in st.team1]
         t2_names = [await get_display_name(interaction, u) for u in st.team2]
@@ -1131,7 +1057,6 @@ async def ds_cmd(interaction: discord.Interaction):
             inline=True,
         )
 
-    # Jos kumpikaan ei käynnissä → normaali jonolista
     else:
         qnames = [await get_display_name(interaction, u) for u in st.queue]
         embed.add_field(
@@ -1176,7 +1101,6 @@ async def winners_cmd(interaction: discord.Interaction):
         wr = (wins / games * 100.0) if games > 0 else 0.0
         rows.append((name, wins, games, wr))
 
-    # Lajittelu: ensin voitot, sitten WR, lopuksi nimi
     rows.sort(key=lambda r: (-r[1], -r[3], r[0].lower()))
 
     top = rows[:10]
@@ -1250,21 +1174,20 @@ async def reset_cmd(interaction: discord.Interaction):
         st.ready_task.cancel()
     st.draft_active = False
     st.captains = None
+    st.last_pick_prefix = None
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
     
 @bot.tree.command(name="filltest", description="Täyttää jonon testipelaajilla (vain kehityskäyttöön).")
 async def filltest_cmd(interaction: discord.Interaction):
-    # Sallii vain mun käyttää tätä
     if interaction.user.id != 97687348396953600:
-        await interaction.response.send_message("❌ Sinulla ei ole oikeutta käyttää tätä komentoa.", ephemeral=True)
+        await interaction.response.send_message("Sinulla ei ole oikeutta käyttää tätä komentoa.", ephemeral=True)
         return
         
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
     uid = interaction.user.id
 
-    # Lisää kutsuja jonoon jos puuttuu
     if uid not in st.queue:
         st.queue.append(uid)
 
@@ -1287,12 +1210,10 @@ async def filltest_cmd(interaction: discord.Interaction):
         ephemeral=True
     )
 
-    # Jos jono on täynnä eikä readycheck ole päällä, käynnistä readycheck.
-    # Feikit merkitään valmiiksi heti; oikeat käyttäjät laittavat /r.
     if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active and not st.draft_active:
         st.readycheck_active = True
         st.ready_users = set()
-        st.ready_users.update(st.fake_users)  # feikit valmiiksi automaattisesti
+        st.ready_users.update(st.fake_users)
         real_mentions = " ".join(mention(u) for u in st.queue if u not in st.fake_users)
         await interaction.followup.send(
             "**Testimoodi:** Feikkipelaajat merkitty valmiiksi.\n"
@@ -1302,9 +1223,7 @@ async def filltest_cmd(interaction: discord.Interaction):
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
 
-
-# !add
-@bot.command(name="add", aliases=["dad", "bad", "ad"])
+@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await add_cmd.callback(interaction)

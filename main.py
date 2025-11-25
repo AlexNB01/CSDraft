@@ -21,7 +21,9 @@ QUEUE_SIZE = 10
 READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
-
+AUTO_VOICE_CHANNELS = True
+TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
+TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -101,9 +103,9 @@ class DraftState:
     rc_timer_task: Optional[asyncio.Task] = None
     rc_timer_msg: Optional[discord.Message] = None
     rc_deadline_ts: Optional[float] = None
-    pick_timer_seq: int = 0
-    
+    pick_timer_seq: int = 0    
     game_id: Optional[int] = None
+
 
 # -----------------------------
 # Database tsydeemi :3
@@ -579,6 +581,24 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
             ),
             embed=emb
         )
+        
+        team1_ids = list(st.team1)
+        team2_ids = list(st.team2)
+        fake_users = set(st.fake_users)
+
+        if AUTO_VOICE_CHANNELS:
+            countdown_msg = await interaction.followup.send(
+                "Pelaajat siirretään voice-kanaville **15s** kuluttua…"
+            )
+            asyncio.create_task(
+                voice_move_countdown(
+                    interaction,
+                    team1_ids=team1_ids,
+                    team2_ids=team2_ids,
+                    fake_users=fake_users,
+                    msg=countdown_msg,
+                )
+            )
 
         drafted = set(st.team1 + st.team2)
         st.queue = [u for u in st.queue if u not in drafted]
@@ -613,6 +633,109 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
 
     await announce_next_picker(interaction, st)
 
+async def move_players_to_fixed_voice_channels(
+    guild: discord.Guild,
+    fake_users: Set[int],
+    team1_ids: List[int],
+    team2_ids: List[int],
+) -> str:
+    if not AUTO_VOICE_CHANNELS:
+        return "🎧 Voice-siirto ei ole käytössä (AUTO_VOICE_CHANNELS = False)."
+
+    if not TEAM1_VOICE_CHANNEL_ID or not TEAM2_VOICE_CHANNEL_ID:
+        return (
+            "⚠️ Voice-siirto on päällä, mutta TEAM1_VOICE_CHANNEL_ID / TEAM2_VOICE_CHANNEL_ID "
+            "ei ole asetettu configissa."
+        )
+
+    ch1 = guild.get_channel(TEAM1_VOICE_CHANNEL_ID)
+    ch2 = guild.get_channel(TEAM2_VOICE_CHANNEL_ID)
+
+    if not isinstance(ch1, discord.VoiceChannel) or not isinstance(ch2, discord.VoiceChannel):
+        return (
+            "⚠️ En löytänyt asetettuja voice-kanavia tai ne eivät ole voice-kanavia.\n"
+            "Tarkista TEAM1_VOICE_CHANNEL_ID ja TEAM2_VOICE_CHANNEL_ID."
+        )
+
+    async def move_team(team_uids: List[int], channel: discord.VoiceChannel):
+        moved = 0
+        for uid in team_uids:
+            if uid in fake_users:
+                continue
+            member = guild.get_member(uid)
+            if not member:
+                continue
+            if member.voice and member.voice.channel:
+                try:
+                    await member.move_to(channel)
+                    moved += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+        return moved
+
+    moved1 = await move_team(team1_ids, ch1)
+    moved2 = await move_team(team2_ids, ch2)
+
+    return (
+        "Pelaajat, jotka olivat jo voicessa, siirrettiin oikeille kanaville :3"
+    )
+
+async def voice_move_countdown(
+    interaction: discord.Interaction,
+    team1_ids: List[int],
+    team2_ids: List[int],
+    fake_users: Set[int],
+    msg: Optional[discord.Message],
+):
+    guild = interaction.guild
+    if not guild:
+        if msg is not None:
+            try:
+                await msg.edit(content="⚠️ En voinut siirtää pelaajia voiceen (guild puuttuu).")
+            except discord.HTTPException:
+                pass
+        return
+
+    if msg is None:
+        if interaction.channel:
+            try:
+                msg = await interaction.channel.send(
+                    "🎧 Pelaajat siirretään voice-kanaville **15s** kuluttua…"
+                )
+            except discord.HTTPException:
+                return
+        else:
+            return
+
+    seconds = 15
+    try:
+        for remaining in range(seconds, 0, -1):
+            try:
+                await msg.edit(
+                    content=f"Pelaajat siirretään voice-kanaville **{remaining}s** kuluttua…"
+                )
+            except discord.HTTPException:
+                return
+            await asyncio.sleep(1)
+
+        result_text = await move_players_to_fixed_voice_channels(
+            guild,
+            fake_users=fake_users,
+            team1_ids=team1_ids,
+            team2_ids=team2_ids,
+        )
+
+        try:
+            await msg.edit(content=result_text)
+        except discord.HTTPException:
+            pass
+
+    except asyncio.CancelledError:
+        try:
+            await msg.edit(content="⚠️ Voice-siirto peruttiin.")
+        except Exception:
+            pass
+        return
 
 async def backup_db(keep: int = 10):
     src = bot.db.path
@@ -754,20 +877,17 @@ class InteractionShim:
 
         class _Resp:
             async def send_message(_, content=None, *, embed=None, ephemeral=False):
-                await ctx.reply(content or "", embed=embed)
+                return await ctx.reply(content or "", embed=embed)
 
             async def defer(_, thinking=False):
                 pass
 
-
         class _Follow:
             async def send(_, content=None, *, embed=None, ephemeral=False):
-                await ctx.send(content or "", embed=embed)
+                return await ctx.send(content or "", embed=embed)
 
         self.response = _Resp()
         self.followup = _Follow()
-
-
 
 # -----------------------------
 # Komennot :3
@@ -1223,17 +1343,17 @@ async def filltest_cmd(interaction: discord.Interaction):
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
 
-@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad"])
+@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await add_cmd.callback(interaction)
 
-@bot.command(name="rm")
+@bot.command(name="rm", aliases=["remove"])
 async def rm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await rm_cmd.callback(interaction)
 
-@bot.command(name="r")
+@bot.command(name="r", aliases=["ready"])
 async def r_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await r_cmd.callback(interaction)

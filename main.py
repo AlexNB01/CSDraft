@@ -24,6 +24,7 @@ PICK_TIMEOUT_SECONDS = 45
 AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
 TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
+VOICE_LOBBY_CHANNEL_ID = 364497233061871628
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -737,6 +738,84 @@ async def voice_move_countdown(
             pass
         return
 
+async def move_players_to_lobby(guild: discord.Guild, player_ids: List[int]) -> int:
+    """Siirtää annetut pelaajat aulakanavalle, jos he ovat jo voice-kanavassa."""
+    lobby = guild.get_channel(VOICE_LOBBY_CHANNEL_ID)
+    if not isinstance(lobby, discord.VoiceChannel):
+        return -1  # tarkoittaa että kanavaa ei löytynyt / väärä tyyppi
+
+    moved = 0
+    for uid in player_ids:
+        member = guild.get_member(uid)
+        if not member:
+            continue
+        if member.voice and member.voice.channel:
+            try:
+                await member.move_to(lobby)
+                moved += 1
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+    return moved
+
+
+async def lobby_move_countdown(
+    interaction: discord.Interaction,
+    all_players: List[int],
+    msg: Optional[discord.Message],
+):
+    """Laskee 15s ja siirtää sen jälkeen kaikki pelin pelaajat aulaan."""
+    guild = interaction.guild
+    if not guild:
+        if msg is not None:
+            try:
+                await msg.edit(content="⚠️ En voinut siirtää pelaajia aulaan (guild puuttuu).")
+            except discord.HTTPException:
+                pass
+        return
+
+    # Jos viestiä ei ole (esim. prefix-komento + jotain meni pieleen), luodaan uusi
+    if msg is None:
+        if interaction.channel:
+            try:
+                msg = await interaction.channel.send(
+                    "Pelaajat siirretään aulaan **15s** kuluttua…"
+                )
+            except discord.HTTPException:
+                return
+        else:
+            return
+
+    seconds = 15
+    try:
+        for remaining in range(seconds, 0, -1):
+            try:
+                await msg.edit(
+                    content=f"Pelaajat siirretään aulaan **{remaining}s** kuluttua…"
+                )
+            except discord.HTTPException:
+                return
+            await asyncio.sleep(1)
+
+        moved = await move_players_to_lobby(guild, all_players)
+
+        if moved == -1:
+            text = "⚠️ Aulakanavaa ei löytynyt tai se ei ole voice-kanava."
+        else:
+            text = f"🎧 Siirto valmis! **{moved} pelaajaa** siirrettiin aulaan."
+
+        try:
+            await msg.edit(content=text)
+        except discord.HTTPException:
+            pass
+
+    except asyncio.CancelledError:
+        try:
+            await msg.edit(content="⚠️ Aulaan siirto peruttiin.")
+        except Exception:
+            pass
+        return
+
+
 async def backup_db(keep: int = 10):
     src = bot.db.path
     os.makedirs("backups", exist_ok=True)
@@ -1085,15 +1164,39 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
 
     try:
         if winner == 0:
-            await bot.db.set_draw(game_id, overwrite=overwrite)
-            await interaction.response.send_message(f"Tasapeli tallennettu pelille `{game_id}`.")
+            team1, team2 = await bot.db.set_draw(game_id, overwrite=overwrite)
+            msg_text = f"Tasapeli tallennettu pelille `{game_id}`."
         elif winner in (1, 2):
-            await bot.db.set_winner(game_id, winner, overwrite=overwrite)
-            await interaction.response.send_message(f"Voittaja (team {winner}) tallennettu pelille `{game_id}`.")
+            team1, team2 = await bot.db.set_winner(game_id, winner, overwrite=overwrite)
+            msg_text = f"Voittaja (team {winner}) tallennettu pelille `{game_id}`."
         else:
-            await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
+            return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
+
+        # Lähetetään tulosviesti
+        await interaction.response.send_message(msg_text)
+
+        # Käynnistetään 15s countdown aulaan siirtoa varten (voitto TAI tasapeli)
+        all_players = team1 + team2
+
+        countdown_msg = None
+        try:
+            countdown_msg = await interaction.followup.send(
+                "Pelaajat siirretään aulaan **15s** kuluttua…"
+            )
+        except discord.HTTPException:
+            pass
+
+        asyncio.create_task(
+            lobby_move_countdown(
+                interaction,
+                all_players=all_players,
+                msg=countdown_msg,
+            )
+        )
+
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
+
 
 @setwinner_cmd.autocomplete("game_id")
 async def setwinner_game_id_autocomplete(interaction: discord.Interaction, current: str):

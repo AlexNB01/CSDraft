@@ -866,7 +866,7 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
         for _ in range(1000):
             rem = remaining()
 
-            text = f"⏳ Readycheck: **{rem}s** aikaa jäljellä… Kirjoita **!r**!"
+            text = f"⏳ Readycheck: **{rem}s** aikaa jäljellä… Kirjoita **!r** tai klikkaa nappia!"
             if st.rc_timer_msg is None:
                 try:
                     st.rc_timer_msg = await interaction.followup.send(text, ephemeral=False)
@@ -899,6 +899,52 @@ async def _run_ready_countdown(interaction: discord.Interaction, st: DraftState)
                 pass
         st.rc_timer_msg = None
         return
+
+class ReadyCheckButton(discord.ui.View):
+    def __init__(self, bot_instance: 'DraftBot', guild_id: int):
+        super().__init__(timeout=READYCHECK_SECONDS)
+        self.bot = bot_instance
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="PAIKALLA! :3", style=discord.ButtonStyle.green, emoji="✅")
+    async def ready_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        st = self.bot.get_state(self.guild_id)
+
+        if not st.readycheck_active:
+            return await interaction.response.send_message("Readycheck ei ole enää käynnissä.", ephemeral=True)
+
+        if interaction.user.id not in st.queue:
+            return await interaction.response.send_message("Et ole jonossa.", ephemeral=True)
+
+        if interaction.user.id in st.ready_users:
+            return await interaction.response.send_message("Olet jo merkinnyt itsesi valmiiksi!", ephemeral=True)
+
+        st.ready_users.add(interaction.user.id)
+        left = QUEUE_SIZE - len(st.ready_users)
+
+        if left > 0:
+            await interaction.response.send_message(f"✅ Merkitty valmiiksi! Odotetaan vielä {left} pelaajaa…", ephemeral=True)
+        else:
+            await interaction.response.defer()
+            st.readycheck_active = False
+            if st.ready_task and not st.ready_task.done():
+                st.ready_task.cancel()
+
+            if st.rc_timer_task and not st.rc_timer_task.done():
+                st.rc_timer_task.cancel()
+            st.rc_timer_task = None
+            if st.rc_timer_msg:
+                try:
+                    await st.rc_timer_msg.delete()
+                except Exception:
+                    pass
+            st.rc_timer_msg = None
+
+            await start_draft(interaction)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
     try:
@@ -987,10 +1033,12 @@ async def add_cmd(interaction: discord.Interaction):
         st.readycheck_active = True
         st.ready_users = set()
         mentions = " ".join(mention(u) for u in st.queue)
+        view = ReadyCheckButton(bot, interaction.guild_id)
         await interaction.followup.send(
             f"**Jonossa 10 pelaajaa!** Readycheck alkaa nyt ({READYCHECK_SECONDS}s).\n"
             f"{mentions}\n"
-            f"Kirjoittakaa **!r** ollaksenne mukana seuraavassa pelissä!."
+            f"Klikkaa nappia tai kirjoita **!r** ollaksesi mukana seuraavassa pelissä!",
+            view=view
         )
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
@@ -1438,10 +1486,12 @@ async def filltest_cmd(interaction: discord.Interaction):
         st.ready_users = set()
         st.ready_users.update(st.fake_users)
         real_mentions = " ".join(mention(u) for u in st.queue if u not in st.fake_users)
+        view = ReadyCheckButton(bot, interaction.guild_id)
         await interaction.followup.send(
             "**Testimoodi:** Feikkipelaajat merkitty valmiiksi.\n"
             f"{real_mentions}\n"
-            f"Oikeat pelaajat: kirjoittakaa **!r** {READYCHECK_SECONDS} sekunnin sisällä."
+            f"Oikeat pelaajat: klikkaa nappia tai kirjoita **!r** {READYCHECK_SECONDS} sekunnin sisällä.",
+            view=view
         )
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))

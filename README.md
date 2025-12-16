@@ -1,0 +1,159 @@
+# CSDraft Bot
+
+A feature-rich Discord bot for organizing Counter-Strike draft matches with automated team selection, statistics tracking, and voice channel management.
+
+[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Discord.py](https://img.shields.io/badge/discord.py-2.0+-blue.svg)](https://github.com/Rapptz/discord.py)
+
+## Features
+
+A Simple Discord bot for ogranizing CS2 inhouse matches.
+
+Please don't let this ruin your friendships too much. :3
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10 or higher
+- Discord Bot Token ([Create one here](https://discord.com/developers/applications))
+- Discord Server with voice channels
+
+### Required configuration
+
+1. **Configure voice channels** (Optional)
+
+   Edit `main.py` lines 24-27 with your Discord voice channel IDs:
+
+   ```python
+   TEAM1_VOICE_CHANNEL_ID = <id>
+   TEAM2_VOICE_CHANNEL_ID = <id>
+   VOICE_LOBBY_CHANNEL_ID = <id>
+   ```
+
+   To get channel IDs: Enable Developer Mode in Discord → Right-click channel → Copy ID
+
+Key settings in `main.py`:
+
+```python
+QUEUE_SIZE = 10                    # Players needed for a draft
+READYCHECK_SECONDS = 120           # Readycheck timeout (2 minutes)
+PICK_TIMEOUT_SECONDS = 45          # Captain pick timeout
+AUTO_VOICE_CHANNELS = True         # Enable automatic voice channel moves
+EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
+```
+
+## Commands
+
+### Player Commands
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/add` | `!add`, `!dad`, `!ad`, etc. | Join the draft queue |
+| `/rm` | `!rm`, `!remove` | Leave the queue |
+| `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
+| `/pstats [user]` | `!pstats` | View player statistics and rankings |
+| `/dstatus` | `!dstatus` | Check current queue/draft status |
+| `/pick <number>` | `!pick`, `!p` | Captain: Pick a player by number |
+
+### Leaderboard Commands
+
+| Command | Description |
+|---------|-------------|
+| `/top10` | Players with most games |
+| `/winners` | Players with most wins (sorted by win rate) |
+| `/captains` | Players who've captained most |
+| `/thinkids` | Players picked first most often |
+| `/fatkids` | Players picked last most often |
+
+### Admin Commands
+
+| Command | Description |
+|---------|-------------|
+| `/setwinner <game_id> <1\|2>` | Set winning team for a game |
+| `/setdraw <game_id>` | Mark game as a draw |
+| `/reset` | Clear queue and draft state (requires Manage Server) |
+| `/filltest` | Fill queue with test players (dev only) |
+
+## Flow for queue
+
+### 1. Queue Phase
+
+Players use `/add` to join the queue. When 10 players are queued, readycheck begins automatically.
+
+### 2. Readycheck
+
+Players have 120 seconds to click the ready button or type `/r`. Players who don't ready up are removed from the queue.
+
+### 3. Draft Phase
+
+- Two captains are randomly selected
+- Captains take turns picking players using `/p <number>`
+- Pick order: Team1 → Team2 → Team1 → Team2 → Team1 → Team2 → Team2
+- Each captain has 45 seconds per pick (auto-pick if timeout)
+- Last player automatically assigned to Team 1
+
+### 4. Game Time
+
+- Teams are displayed in an embed
+- If enabled, players are automatically moved to team voice channels after 15 seconds
+- Game ID is generated for stat tracking
+
+### 5. Post-Game
+
+- Typically captain sets winner with `/setwinner <game_id> <1|2>` or `/setdraw <game_id>`
+- Stats are updated automatically
+- Players moved back to lobby voice channel after 15 seconds
+
+## Database Schema
+
+The bot uses SQLite with two main tables:
+
+### players
+
+- `user_id` - Discord user ID (primary key)
+- `games_played` - Total games participated in
+- `wins` - Total wins
+- `captain_count` - Times selected as captain
+- `first_pick_count` - Times picked first
+- `last_pick_count` - Times picked last
+
+### games
+
+- `id` - Auto-incrementing game ID
+- `guild_id` - Discord server ID
+- `team1` - JSON array of Team 1 user IDs
+- `team2` - JSON array of Team 2 user IDs
+- `winner` - 1, 2, 0 (draw), or NULL (unset)
+- `created_at` - Timestamp
+
+Database file: `draftbot.sqlite3`
+Backups: `backups/` directory (last 10 kept)
+
+### Testing Mode
+
+Use `/filltest` to automatically fill the queue with fake players for testing:
+
+- Adds 9 test players to complete the queue
+- Test players auto-ready during readycheck
+- Test players skipped for voice channel operations
+- Only accessible to developer (hardcoded user ID)
+
+### State Management
+
+Each Discord server (guild) maintains independent state:
+
+- Queue contents
+- Readycheck status
+- Draft progress
+- Team compositions
+
+## Credits
+
+**Developer:** AlexNB01
+
+**Contributor:** TomG-FIN
+
+**Built with:** discord.py, aiosqlite, Python 3.10+
+
+### CSDraft by AlexNB01

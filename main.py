@@ -22,9 +22,10 @@ READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
 AUTO_VOICE_CHANNELS = True
-TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
-TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
-VOICE_LOBBY_CHANNEL_ID = 364497233061871628
+TEAM1_VOICE_CHANNEL_ID = 85232997602709504
+TEAM2_VOICE_CHANNEL_ID = 131440492314492928
+VOICE_LOBBY_CHANNEL_ID = 85232997602709504
+ADMIN_ID = 231712366981677056
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -1377,7 +1378,13 @@ async def start_draft(interaction: discord.Interaction):
     real_pool = [u for u in pool if u not in st.fake_users]
     if len(real_pool) >= 2:
         c1, c2 = real_pool[0], real_pool[1]
+    elif len(real_pool) == 1:
+        # Ensure the one real player is captain 1
+        c1 = real_pool[0]
+        fake_pool = [u for u in pool if u in st.fake_users]
+        c2 = fake_pool[0] if fake_pool else pool[1]
     else:
+        # No real players (unlikely), use any two from pool
         c1, c2 = pool[0], pool[1]
 
     st.captains = (c1, c2)
@@ -1474,7 +1481,7 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
 @bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2; 0=tasan)")
 @app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")
 async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: int):
-    overwrite = (interaction.user.id == 97687348396953600)
+    overwrite = (interaction.user.id == ADMIN_ID)
 
     try:
         if winner == 0:
@@ -1771,7 +1778,7 @@ async def reset_cmd(interaction: discord.Interaction):
     
 @bot.tree.command(name="filltest", description="Täyttää jonon testipelaajilla (vain kehityskäyttöön).")
 async def filltest_cmd(interaction: discord.Interaction):
-    if interaction.user.id != 97687348396953600:
+    if interaction.user.id != ADMIN_ID:
         await interaction.response.send_message("Sinulla ei ole oikeutta käyttää tätä komentoa.", ephemeral=True)
         return
         

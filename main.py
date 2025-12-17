@@ -1001,15 +1001,15 @@ class InteractionShim:
         self.channel = ctx.channel
 
         class _Resp:
-            async def send_message(_, content=None, *, embed=None, ephemeral=False):
-                return await ctx.reply(content or "", embed=embed)
+            async def send_message(_, content=None, *, embed=None, ephemeral=False, view=None):
+                return await ctx.reply(content or "", embed=embed, view=view)
 
             async def defer(_, thinking=False):
                 pass
 
         class _Follow:
-            async def send(_, content=None, *, embed=None, ephemeral=False):
-                return await ctx.send(content or "", embed=embed)
+            async def send(_, content=None, *, embed=None, ephemeral=False, view=None):
+                return await ctx.send(content or "", embed=embed, view=view)
 
         self.response = _Resp()
         self.followup = _Follow()

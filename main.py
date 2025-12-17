@@ -25,7 +25,10 @@ AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 85232997602709504
 TEAM2_VOICE_CHANNEL_ID = 131440492314492928
 VOICE_LOBBY_CHANNEL_ID = 85232997602709504
-ADMIN_ID = 231712366981677056
+
+# List of admin user IDs
+ADMIN_IDS = [97687348396953600 # Alex
+            ,231712366981677056]  # Snowblind
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -1481,7 +1484,7 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
 @bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2; 0=tasan)")
 @app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")
 async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: int):
-    overwrite = (interaction.user.id == ADMIN_ID)
+    overwrite = (interaction.user.id in ADMIN_IDS)
 
     try:
         if winner == 0:
@@ -1778,7 +1781,7 @@ async def reset_cmd(interaction: discord.Interaction):
     
 @bot.tree.command(name="filltest", description="Täyttää jonon testipelaajilla (vain kehityskäyttöön).")
 async def filltest_cmd(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_ID:
+    if interaction.user.id not in ADMIN_IDS:
         await interaction.response.send_message("Sinulla ei ole oikeutta käyttää tätä komentoa.", ephemeral=True)
         return
         

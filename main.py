@@ -104,8 +104,9 @@ class DraftState:
     rc_timer_task: Optional[asyncio.Task] = None
     rc_timer_msg: Optional[discord.Message] = None
     rc_deadline_ts: Optional[float] = None
-    pick_timer_seq: int = 0    
+    pick_timer_seq: int = 0
     game_id: Optional[int] = None
+    pick_view: Optional[discord.ui.View] = None
 
 
 # -----------------------------
@@ -539,17 +540,25 @@ async def announce_next_picker(interaction: discord.Interaction, st: DraftState,
     content = (
         f"{head}"
         f"Seuraava vuoro: {mention(captain)}\n\n"
-        f"Valitse pelaaja komennolla !pick numero\n\n"
+        f"Valitse pelaaja komennolla **!pick numero** tai käytä nappeja alla\n\n"
         f"{remaining_block}\n"
     )
 
+    # Stop old view if it exists
+    if st.pick_view:
+        st.pick_view.stop()
+
+    # Create new picker view with buttons
+    picker_view = await create_picker_view(bot, interaction.guild_id, st, interaction)
+    st.pick_view = picker_view
+
     if st.pick_msg:
         try:
-            st.pick_msg = await st.pick_msg.edit(content=content)
+            st.pick_msg = await st.pick_msg.edit(content=content, view=picker_view)
         except Exception:
-            st.pick_msg = await interaction.followup.send(content, ephemeral=False)
+            st.pick_msg = await interaction.followup.send(content, view=picker_view, ephemeral=False)
     else:
-        st.pick_msg = await interaction.followup.send(content, ephemeral=False)
+        st.pick_msg = await interaction.followup.send(content, view=picker_view, ephemeral=False)
 
     await start_pick_timer(interaction, st)
 
@@ -635,6 +644,14 @@ async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int
 
     current_team = st.pick_order[st.pick_index]
     target_team = st.team1 if current_team == "team1" else st.team2
+
+    # Disable button view since pick is being made
+    if st.pick_view:
+        st.pick_view.stop()
+        for item in st.pick_view.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        st.pick_view = None
 
     if uid in st.pick_pool:
         target_team.append(uid)
@@ -733,6 +750,12 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
                 pass
         st.timer_msg = None
         st.pick_msg = None
+
+        # Clean up button view
+        if st.pick_view:
+            st.pick_view.stop()
+            st.pick_view = None
+
         return
 
     if st.pick_timer_task and not st.pick_timer_task.done():
@@ -1059,6 +1082,131 @@ class ReadyCheckButton(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
+
+async def create_picker_view(
+    bot_instance: 'DraftBot',
+    guild_id: int,
+    st: DraftState,
+    interaction: discord.Interaction
+) -> 'PickerView':
+    """Factory function to create and initialize PickerView asynchronously."""
+    team = st.pick_order[st.pick_index]
+    expected_captain = st.captains[0] if team == "team1" else st.captains[1]
+
+    view = PickerView(
+        bot_instance=bot_instance,
+        guild_id=guild_id,
+        pick_pool=list(st.pick_pool),
+        number_by_uid=dict(st.number_by_uid),
+        expected_captain_id=expected_captain,
+        fake_users=st.fake_users,
+        interaction_for_names=interaction
+    )
+
+    await view.initialize_buttons()
+    return view
+
+
+class PickerView(discord.ui.View):
+    """Interactive button view for captain player selection."""
+
+    def __init__(
+        self,
+        bot_instance: 'DraftBot',
+        guild_id: int,
+        pick_pool: List[int],
+        number_by_uid: Dict[int, int],
+        expected_captain_id: int,
+        fake_users: Set[int],
+        interaction_for_names: discord.Interaction
+    ):
+        super().__init__(timeout=PICK_TIMEOUT_SECONDS)
+        self.bot = bot_instance
+        self.guild_id = guild_id
+        self.expected_captain_id = expected_captain_id
+        self.fake_users = fake_users
+        self.interaction_for_names = interaction_for_names
+
+        self._pick_pool = pick_pool
+        self._number_by_uid = number_by_uid
+
+    async def initialize_buttons(self):
+        """Async initialization to fetch player names and create buttons."""
+        for uid in self._pick_pool:
+            player_number = self._number_by_uid[uid]
+
+            # Get display name
+            if uid in self.fake_users:
+                display_name = f"test-{uid % 1000000}"
+            else:
+                display_name = await get_display_name(self.interaction_for_names, uid)
+
+            # Truncate name if too long (button labels have 80 char limit)
+            label = f"{player_number} - {display_name[:20]}"
+
+            # Create button - 2 per row for vertical layout
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"pick_{self.guild_id}_{uid}",
+                row=(player_number - 1) // 2  # 2 buttons per row
+            )
+
+            # Assign callback
+            button.callback = self._create_pick_callback(uid)
+            self.add_item(button)
+
+        return self
+
+    def _create_pick_callback(self, uid: int):
+        """Create button callback for specific player."""
+        async def pick_callback(interaction: discord.Interaction):
+            st = self.bot.get_state(self.guild_id)
+
+            # Validation 1: Draft active
+            if not st.draft_active:
+                return await interaction.response.send_message(
+                    "Draft ei ole käynnissä.", ephemeral=True
+                )
+
+            # Validation 2: Authorization
+            if interaction.user.id != self.expected_captain_id:
+                return await interaction.response.send_message(
+                    "Ei ole sinun vuorosi valita.", ephemeral=True
+                )
+
+            # Validation 3: Player available
+            if uid not in st.pick_pool:
+                return await interaction.response.send_message(
+                    "Tämä pelaaja on jo valittu.", ephemeral=True
+                )
+
+            # Validation 4: Pick index valid
+            if st.pick_index >= len(st.pick_order):
+                return await interaction.response.send_message(
+                    "Kaikki pelaajat on jo valittu.", ephemeral=True
+                )
+
+            # Defer immediately to prevent timeout
+            await interaction.response.defer(thinking=False)
+
+            # Stop current view to disable all buttons
+            if st.pick_view:
+                st.pick_view.stop()
+                st.pick_view = None
+
+            # Apply the pick using existing logic
+            await _apply_pick(interaction, st, uid, is_autopick=False)
+
+        return pick_callback
+
+    async def on_timeout(self):
+        """Disable all buttons when timeout occurs."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+
 async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
     try:
         await asyncio.sleep(READYCHECK_SECONDS)
@@ -1289,6 +1437,11 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
         return await interaction.response.send_message("Virheellinen numero tai pelaaja on jo valittu.", ephemeral=True)
 
     await interaction.response.defer(thinking=False)
+
+    # Disable button view since command pick is being made
+    if st.pick_view:
+        st.pick_view.stop()
+        st.pick_view = None
 
     target_team = st.team1 if team == "team1" else st.team2
     target_team.append(uid)
@@ -1611,6 +1764,9 @@ async def reset_cmd(interaction: discord.Interaction):
     st.captains = None
     st.last_pick_prefix = None
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
+    if st.pick_view:
+        st.pick_view.stop()
+    st.pick_view = None
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
     
 @bot.tree.command(name="filltest", description="Täyttää jonon testipelaajilla (vain kehityskäyttöön).")

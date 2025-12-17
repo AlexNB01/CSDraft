@@ -7,7 +7,7 @@ A feature-rich Discord bot for organizing Counter-Strike draft matches with auto
 
 ## Features
 
-A Simple Discord bot for ogranizing CS2 inhouse matches.
+A Simple Discord bot for organizing CS2 inhouse matches.
 
 Please don't let this ruin your friendships too much. :3
 

@@ -1318,12 +1318,12 @@ async def ds_cmd(interaction: discord.Interaction):
         t1_names = [await get_display_name(interaction, u) for u in st.team1]
         t2_names = [await get_display_name(interaction, u) for u in st.team2]
         embed.add_field(
-            name=f"🟦 Tiimi 1 ({len(t1_names)})",
+            name=f"Tiimi 1 ({len(t1_names)})",
             value="\n".join(t1_names) if t1_names else "—",
             inline=True,
         )
         embed.add_field(
-            name=f"🟥 Tiimi 2 ({len(t2_names)})",
+            name=f"Tiimi 2 ({len(t2_names)})",
             value="\n".join(t2_names) if t2_names else "—",
             inline=True,
         )
@@ -1331,7 +1331,7 @@ async def ds_cmd(interaction: discord.Interaction):
     else:
         qnames = [await get_display_name(interaction, u) for u in st.queue]
         embed.add_field(
-            name=f"👥 Jonossa ({len(qnames)})",
+            name=f"Jonossa ({len(qnames)})",
             value="\n".join(qnames),
             inline=False,
         )
@@ -1496,12 +1496,12 @@ async def filltest_cmd(interaction: discord.Interaction):
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
 
-@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam"])
+@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "mukaan"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await add_cmd.callback(interaction)
 
-@bot.command(name="rm", aliases=["remove"])
+@bot.command(name="rm", aliases=["remove", "nah", "nvm"])
 async def rm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await rm_cmd.callback(interaction)

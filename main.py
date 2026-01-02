@@ -1496,7 +1496,7 @@ async def filltest_cmd(interaction: discord.Interaction):
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
 
-@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "mukaan"])
+@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "moti100", "join", "play", "pelataan", "pistämutjonoon", "gaming", "messiin", "liity", "mukaan", "lisäys", "peli", "peliä", "pelejä"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await add_cmd.callback(interaction)

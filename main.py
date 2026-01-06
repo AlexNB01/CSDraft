@@ -801,7 +801,7 @@ async def lobby_move_countdown(
         if moved == -1:
             text = "⚠️ Aulakanavaa ei löytynyt tai se ei ole voice-kanava."
         else:
-            text = f"🎧 Siirto valmis! **{moved} pelaajaa** siirrettiin aulaan."
+            text = f"Siirto valmis! **{moved} pelaajaa** siirrettiin aulaan."
 
         try:
             await msg.edit(content=text)
@@ -1496,12 +1496,12 @@ async def filltest_cmd(interaction: discord.Interaction):
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
 
-@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "moti100", "join", "play", "pelataan", "pistämutjonoon", "gaming", "messiin", "liity", "mukaan", "lisäys", "peli", "peliä", "pelejä"])
+@bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "moti100", "join", "play", "pelataan", "pistämutjonoon", "gaming", "messiin", "liity", "mukaan", "lisäys"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await add_cmd.callback(interaction)
 
-@bot.command(name="rm", aliases=["remove", "nah", "nvm"])
+@bot.command(name="rm", aliases=["remove", "nah", "nvm", "moti0", "liikaaslurreja"])
 async def rm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await rm_cmd.callback(interaction)

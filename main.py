@@ -390,7 +390,6 @@ class DB:
 
         return {"games": games, "wins": wins, "losses": losses, "draws": draws}
 
-
 # -----------------------------
 # Bot :3
 # -----------------------------

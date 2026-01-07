@@ -390,6 +390,25 @@ class DB:
 
         return {"games": games, "wins": wins, "losses": losses, "draws": draws}
 
+    async def get_draws_for_users(self, user_ids: List[int]) -> Dict[int, int]:
+        if not user_ids:
+            return {}
+        target_ids = set(user_ids)
+        draws_by_user = {uid: 0 for uid in target_ids}
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT team1, team2 FROM games WHERE winner = 0"
+            )
+            rows = await cur.fetchall()
+
+        for team1_raw, team2_raw in rows:
+            team1 = json.loads(team1_raw)
+            team2 = json.loads(team2_raw)
+            for uid in team1 + team2:
+                if uid in target_ids:
+                    draws_by_user[uid] += 1
+        return draws_by_user
+
 # -----------------------------
 # Bot :3
 # -----------------------------
@@ -424,6 +443,11 @@ bot = DraftBot()
 
 def mention(uid: int) -> str:
     return f"<@{uid}>"
+
+def calculate_winrate(wins: int, draws: int, games: int) -> float:
+    if games <= 0:
+        return 0.0
+    return ((wins + draws * 0.5) / games) * 100.0
     
 async def get_display_name(interaction: discord.Interaction, user_id: int) -> str:
     if interaction.guild:
@@ -1356,7 +1380,8 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
 
     gp = data["games_played"]
     w  = data["wins"]
-    wr = (w / gp * 100) if gp else 0.0
+    draws = (await bot.db.get_draws_for_users([target.id])).get(target.id, 0)
+    wr = calculate_winrate(w, draws, gp)
 
     total_players = await bot.db.count_players()
     r_games   = await bot.db.get_rank("games_played",     target.id)
@@ -1404,7 +1429,7 @@ async def send_head_to_head(
         )
         return
 
-    wr = (stats["wins"] / stats["games"] * 100) if stats["games"] else 0.0
+    wr = calculate_winrate(stats["wins"], stats["draws"], stats["games"])
     target_name = await get_display_name(interaction, target.id)
     opponent_name = await get_display_name(interaction, opponent.id)
 
@@ -1482,10 +1507,11 @@ async def top10_cmd(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
+    draw_map = await bot.db.get_draws_for_users([uid for uid, _, _, _ in rows])
     lines = []
     for i, (uid, _, gp, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        wr = (wins / gp * 100) if gp else 0.0
+        wr = calculate_winrate(wins, draw_map.get(uid, 0), gp)
         lines.append(f"{i}. {name} / {gp}")
 
     emb = discord.Embed(title="Eniten pelejä pelanneet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
@@ -1503,10 +1529,11 @@ async def winners_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("Tietokannassa ei ole vielä pelaajia.", ephemeral=True)
         return
 
+    draw_map = await bot.db.get_draws_for_users([uid for uid, _, _ in players])
     rows = []
     for uid, wins, games in players:
         name = await get_display_name(interaction, uid)
-        wr = (wins / games * 100.0) if games > 0 else 0.0
+        wr = calculate_winrate(wins, draw_map.get(uid, 0), games)
         rows.append((name, wins, games, wr))
 
     rows.sort(key=lambda r: (-r[1], -r[3], r[0].lower()))

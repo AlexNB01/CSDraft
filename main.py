@@ -354,6 +354,42 @@ class DB:
             rows = await cur.fetchall()
             return [r[0] for r in rows]
 
+    async def get_head_to_head(self, user_id: int, opponent_id: int) -> dict:
+        if user_id == opponent_id:
+            return {"games": 0, "wins": 0, "losses": 0, "draws": 0}
+
+        games = wins = losses = draws = 0
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT team1, team2, winner FROM games WHERE team1 LIKE ? OR team2 LIKE ?",
+                (f"%{user_id}%", f"%{user_id}%"),
+            )
+            rows = await cur.fetchall()
+
+        for team1_raw, team2_raw, winner in rows:
+            team1 = json.loads(team1_raw)
+            team2 = json.loads(team2_raw)
+
+            if user_id in team1 and opponent_id in team2:
+                user_team = 1
+            elif user_id in team2 and opponent_id in team1:
+                user_team = 2
+            else:
+                continue
+
+            if winner is None:
+                continue
+
+            games += 1
+            if winner == 0:
+                draws += 1
+            elif winner == user_team:
+                wins += 1
+            else:
+                losses += 1
+
+        return {"games": games, "wins": wins, "losses": losses, "draws": draws}
+
 
 # -----------------------------
 # Bot :3
@@ -400,6 +436,61 @@ async def get_display_name(interaction: discord.Interaction, user_id: int) -> st
         return getattr(u, "global_name", None) or u.name
     except Exception:
         return f"User {user_id}"
+
+def _normalize_name(name: str) -> str:
+    return name.strip().lower()
+
+async def resolve_user_from_text(
+    guild: Optional[discord.Guild],
+    text: str
+) -> Optional[discord.User]:
+    raw = text.strip()
+    if not raw:
+        return None
+
+    if "#" in raw and guild:
+        name_part, _, discrim = raw.rpartition("#")
+        if name_part and discrim.isdigit():
+            for member in guild.members:
+                if member.name == name_part and member.discriminator == discrim:
+                    return member
+
+    if raw.isdigit():
+        try:
+            return await bot.fetch_user(int(raw))
+        except Exception:
+            return None
+
+    if raw.startswith("<@") and raw.endswith(">"):
+        cleaned = raw.strip("<@!>")
+        if cleaned.isdigit():
+            try:
+                return await bot.fetch_user(int(cleaned))
+            except Exception:
+                return None
+
+    if guild:
+        target = _normalize_name(raw)
+        exact_matches = [
+            member
+            for member in guild.members
+            if _normalize_name(member.display_name) == target
+            or _normalize_name(member.name) == target
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if len(exact_matches) > 1:
+            return None
+
+        partial_matches = [
+            member
+            for member in guild.members
+            if target in _normalize_name(member.display_name)
+            or target in _normalize_name(member.name)
+        ]
+        if len(partial_matches) == 1:
+            return partial_matches[0]
+    return None
 
 
 async def show_teams(interaction: discord.Interaction, st: DraftState):
@@ -1289,6 +1380,53 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
     )
     await interaction.response.send_message(embed=emb)
 
+@bot.tree.command(name="winrate", description="Näytä winrate toista pelaajaa vastaan")
+@app_commands.describe(opponent="Pelaaja, jota vastaan", user="Valinnainen: käyttäjä jonka winratea katsotaan")
+async def winrate_cmd(
+    interaction: discord.Interaction,
+    opponent: discord.User,
+    user: Optional[discord.User] = None
+):
+    target = user or interaction.user
+    if target.id == opponent.id:
+        return await interaction.response.send_message("Et voi katsoa winratea itseäsi vastaan.", ephemeral=True)
+
+    await send_head_to_head(interaction, target, opponent)
+
+async def send_head_to_head(
+    interaction: discord.Interaction,
+    target: discord.User,
+    opponent: discord.User
+) -> None:
+    stats = await bot.db.get_head_to_head(target.id, opponent.id)
+    if stats["games"] == 0:
+        await interaction.response.send_message(
+            "Näiden pelaajien välillä ei ole vielä ratkaistuja pelejä.",
+            ephemeral=True
+        )
+        return
+
+    wr = (stats["wins"] / stats["games"] * 100) if stats["games"] else 0.0
+    target_name = await get_display_name(interaction, target.id)
+    opponent_name = await get_display_name(interaction, opponent.id)
+
+    embed = discord.Embed(
+        title=f"Winrate: {target_name} vs {opponent_name}",
+        color=EMBED_COLOR_PRIMARY
+    )
+    embed.add_field(
+        name="Pelit",
+        value=f"{stats['games']} (W {stats['wins']} / L {stats['losses']} / D {stats['draws']})",
+        inline=False
+    )
+    embed.add_field(
+        name="Winrate",
+        value=f"{wr:.1f}%",
+        inline=False
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="dstatus", description="Näyttää jonon, valmiit ja draftin tilan")
 async def ds_cmd(interaction: discord.Interaction):
     st = bot.get_state(interaction.guild_id)
@@ -1525,6 +1663,18 @@ async def dstatus_bang(ctx: commands.Context):
 async def pstats_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
     interaction = InteractionShim(ctx)
     await pstats_cmd.callback(interaction, user or ctx.author)
+
+@bot.command(name="winrate", aliases=["wr"])
+async def winrate_bang(ctx: commands.Context, *, opponent: Optional[str] = None):
+    if opponent is None:
+        return await ctx.reply("Käyttö: `!winrate <nimi tai ID>`")
+    opponent_user = await resolve_user_from_text(ctx.guild, opponent)
+    if not opponent_user:
+        return await ctx.reply("En löytänyt vastustajaa annetulla nimellä tai ID:llä.")
+    if opponent_user.id == ctx.author.id:
+        return await ctx.reply("Et voi katsoa winratea itseäsi vastaan.")
+    interaction = InteractionShim(ctx)
+    await send_head_to_head(interaction, ctx.author, opponent_user)
 
 @bot.command(name="pick", aliases=["p"])
 async def pick_bang(ctx: commands.Context, number: int):

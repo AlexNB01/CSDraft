@@ -354,6 +354,42 @@ class DB:
             rows = await cur.fetchall()
             return [r[0] for r in rows]
 
+    async def get_head_to_head(self, user_id: int, opponent_id: int) -> dict:
+        if user_id == opponent_id:
+            return {"games": 0, "wins": 0, "losses": 0, "draws": 0}
+
+        games = wins = losses = draws = 0
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT team1, team2, winner FROM games WHERE team1 LIKE ? OR team2 LIKE ?",
+                (f"%{user_id}%", f"%{user_id}%"),
+            )
+            rows = await cur.fetchall()
+
+        for team1_raw, team2_raw, winner in rows:
+            team1 = json.loads(team1_raw)
+            team2 = json.loads(team2_raw)
+
+            if user_id in team1 and opponent_id in team2:
+                user_team = 1
+            elif user_id in team2 and opponent_id in team1:
+                user_team = 2
+            else:
+                continue
+
+            if winner is None:
+                continue
+
+            games += 1
+            if winner == 0:
+                draws += 1
+            elif winner == user_team:
+                wins += 1
+            else:
+                losses += 1
+
+        return {"games": games, "wins": wins, "losses": losses, "draws": draws}
+
 
 # -----------------------------
 # Bot :3
@@ -1289,6 +1325,45 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
     )
     await interaction.response.send_message(embed=emb)
 
+@bot.tree.command(name="winrate", description="Näytä winrate toista pelaajaa vastaan")
+@app_commands.describe(opponent="Pelaaja, jota vastaan", user="Valinnainen: käyttäjä jonka winratea katsotaan")
+async def winrate_cmd(
+    interaction: discord.Interaction,
+    opponent: discord.User,
+    user: Optional[discord.User] = None
+):
+    target = user or interaction.user
+    if target.id == opponent.id:
+        return await interaction.response.send_message("Et voi katsoa winratea itseäsi vastaan.", ephemeral=True)
+
+    stats = await bot.db.get_head_to_head(target.id, opponent.id)
+    if stats["games"] == 0:
+        return await interaction.response.send_message(
+            "Näiden pelaajien välillä ei ole vielä ratkaistuja pelejä.",
+            ephemeral=True
+        )
+
+    wr = (stats["wins"] / stats["games"] * 100) if stats["games"] else 0.0
+    target_name = await get_display_name(interaction, target.id)
+    opponent_name = await get_display_name(interaction, opponent.id)
+
+    embed = discord.Embed(
+        title=f"Winrate: {target_name} vs {opponent_name}",
+        color=EMBED_COLOR_PRIMARY
+    )
+    embed.add_field(
+        name="Pelit",
+        value=f"{stats['games']} (W {stats['wins']} / L {stats['losses']} / D {stats['draws']})",
+        inline=False
+    )
+    embed.add_field(
+        name="Winrate",
+        value=f"{wr:.1f}%",
+        inline=False
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="dstatus", description="Näyttää jonon, valmiit ja draftin tilan")
 async def ds_cmd(interaction: discord.Interaction):
     st = bot.get_state(interaction.guild_id)
@@ -1525,6 +1600,13 @@ async def dstatus_bang(ctx: commands.Context):
 async def pstats_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
     interaction = InteractionShim(ctx)
     await pstats_cmd.callback(interaction, user or ctx.author)
+
+@bot.command(name="winrate", aliases=["wr"])
+async def winrate_bang(ctx: commands.Context, opponent: Optional[discord.Member] = None, user: Optional[discord.Member] = None):
+    if opponent is None:
+        return await ctx.reply("Käyttö: `!winrate @opponent`")
+    interaction = InteractionShim(ctx)
+    await winrate_cmd.callback(interaction, opponent, user or ctx.author)
 
 @bot.command(name="pick", aliases=["p"])
 async def pick_bang(ctx: commands.Context, number: int):

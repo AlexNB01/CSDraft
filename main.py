@@ -82,6 +82,7 @@ def build_stats_embed(
 @dataclass
 class DraftState:
     queue: List[int] = field(default_factory=list)
+    queue_joined_at: Dict[int, datetime.datetime] = field(default_factory=dict)
     readycheck_active: bool = False
     ready_users: Set[int] = field(default_factory=set)
     fake_users: Set[int] = field(default_factory=set)
@@ -390,6 +391,46 @@ class DB:
 
         return {"games": games, "wins": wins, "losses": losses, "draws": draws}
 
+    async def get_head_to_head_summary(self, user_id: int) -> Dict[int, dict]:
+        stats: Dict[int, dict] = {}
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT team1, team2, winner FROM games WHERE team1 LIKE ? OR team2 LIKE ?",
+                (f"%{user_id}%", f"%{user_id}%"),
+            )
+            rows = await cur.fetchall()
+
+        for team1_raw, team2_raw, winner in rows:
+            team1 = json.loads(team1_raw)
+            team2 = json.loads(team2_raw)
+
+            if user_id in team1:
+                user_team = 1
+                opponents = team2
+            elif user_id in team2:
+                user_team = 2
+                opponents = team1
+            else:
+                continue
+
+            if winner is None:
+                continue
+
+            for opponent_id in opponents:
+                entry = stats.setdefault(
+                    opponent_id,
+                    {"games": 0, "wins": 0, "losses": 0, "draws": 0},
+                )
+                entry["games"] += 1
+                if winner == 0:
+                    entry["draws"] += 1
+                elif winner == user_team:
+                    entry["wins"] += 1
+                else:
+                    entry["losses"] += 1
+
+        return stats
+
     async def get_draws_for_users(self, user_ids: List[int]) -> Dict[int, int]:
         if not user_ids:
             return {}
@@ -449,6 +490,40 @@ def calculate_winrate(wins: int, draws: int, games: int) -> float:
         return 0.0
     return ((wins + draws * 0.5) / games) * 100.0
     
+def format_elapsed(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    minutes, sec = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if sec or not parts:
+        parts.append(f"{sec}s")
+    return " ".join(parts)
+
+async def format_queue_lines(
+    interaction: discord.Interaction,
+    queue: List[int],
+    joined_at_map: Dict[int, datetime.datetime],
+) -> List[str]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    lines = []
+    for uid in queue:
+        name = await get_display_name(interaction, uid)
+        joined_at = joined_at_map.get(uid)
+        if joined_at is None:
+            elapsed = "?"
+        else:
+            elapsed = format_elapsed((now - joined_at).total_seconds())
+        lines.append(f"{name} — {elapsed}")
+    return lines
+
 async def get_display_name(interaction: discord.Interaction, user_id: int) -> str:
     if interaction.guild:
         m = interaction.guild.get_member(user_id)
@@ -716,6 +791,11 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
 
         drafted = set(st.team1 + st.team2)
         st.queue = [u for u in st.queue if u not in drafted]
+        st.queue_joined_at = {
+            uid: joined_at
+            for uid, joined_at in st.queue_joined_at.items()
+            if uid in st.queue
+        }
         st.draft_active = False
         st.captains = None
         st.team1.clear(); st.team2.clear(); st.pick_pool.clear()
@@ -1087,6 +1167,11 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
                 "Seuraavat eivät vahvistaneet ja poistettiin jonosta: " + ", ".join(nimet)
             )
             st.queue = [u for u in st.queue if u in st.ready_users]
+            st.queue_joined_at = {
+                uid: joined_at
+                for uid, joined_at in st.queue_joined_at.items()
+                if uid in st.queue
+            }
         else:
             await interaction.followup.send("⏰ Readycheck päättyi.")
 
@@ -1140,6 +1225,7 @@ async def add_cmd(interaction: discord.Interaction):
     if uid in st.queue:
         return await interaction.response.send_message("Olet jo jonossa.", ephemeral=True)
     st.queue.append(uid)
+    st.queue_joined_at[uid] = datetime.datetime.now(datetime.timezone.utc)
     await interaction.response.send_message(f"Lisätty jonoon. Pelaajia jonossa: {len(st.queue)}/{QUEUE_SIZE}")
 
     if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
@@ -1163,6 +1249,7 @@ async def rm_cmd(interaction: discord.Interaction):
     uid = interaction.user.id
     if uid in st.queue and not st.readycheck_active and not st.draft_active:
         st.queue.remove(uid)
+        st.queue_joined_at.pop(uid, None)
         return await interaction.response.send_message("Poistuttu jonosta.")
     return await interaction.response.send_message("Et ole jonossa tai poistuminen ei juuri nyt onnistu.", ephemeral=True)
 
@@ -1407,10 +1494,12 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
 @app_commands.describe(opponent="Pelaaja, jota vastaan", user="Valinnainen: käyttäjä jonka winratea katsotaan")
 async def winrate_cmd(
     interaction: discord.Interaction,
-    opponent: discord.User,
+    opponent: Optional[discord.User] = None,
     user: Optional[discord.User] = None
 ):
     target = user or interaction.user
+    if opponent is None:
+        return await send_head_to_head_summary(interaction, target)
     if target.id == opponent.id:
         return await interaction.response.send_message("Et voi katsoa winratea itseäsi vastaan.", ephemeral=True)
 
@@ -1450,6 +1539,63 @@ async def send_head_to_head(
     embed.set_footer(text=EMBED_FOOTER_TEXT)
     await interaction.response.send_message(embed=embed)
 
+async def send_head_to_head_summary(
+    interaction: discord.Interaction,
+    target: discord.User
+) -> None:
+    stats_map = await bot.db.get_head_to_head_summary(target.id)
+    if not stats_map:
+        await interaction.response.send_message(
+            "Ei vielä ratkaistuja pelejä tätä pelaajaa vastaan.",
+            ephemeral=True,
+        )
+        return
+
+    rows = []
+    for opponent_id, stats in stats_map.items():
+        games = stats["games"]
+        if games < 5:
+            continue
+        wr = calculate_winrate(stats["wins"], stats["draws"], games)
+        rows.append((opponent_id, stats["wins"], stats["losses"], stats["draws"], games, wr))
+
+    if not rows:
+        await interaction.response.send_message(
+            "Ei vielä ratkaistuja pelejä tätä pelaajaa vastaan.",
+            ephemeral=True,
+        )
+        return
+
+    best = sorted(rows, key=lambda r: (-r[5], -r[4], r[0]))[:5]
+    worst = sorted(rows, key=lambda r: (r[5], -r[4], r[0]))[:5]
+
+    async def build_lines(items: List[Tuple[int, int, int, int, int, float]]) -> str:
+        lines = []
+        for i, (opponent_id, wins, losses, draws, games, wr) in enumerate(items, start=1):
+            name = await get_display_name(interaction, opponent_id)
+            lines.append(
+                f"{i}. {name} — {wr:.1f}% (W {wins} / L {losses} / D {draws}, {games} peliä)"
+            )
+        return "\n".join(lines) if lines else "—"
+
+    target_name = await get_display_name(interaction, target.id)
+    embed = discord.Embed(
+        title=f"Winrate-yhteenveto: {target_name}",
+        color=EMBED_COLOR_PRIMARY,
+    )
+    embed.add_field(
+        name="Parhaat winratet (Top 5)",
+        value=await build_lines(best),
+        inline=False,
+    )
+    embed.add_field(
+        name="Huonoimmat winratet (Top 5)",
+        value=await build_lines(worst),
+        inline=False,
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="dstatus", description="Näyttää jonon, valmiit ja draftin tilan")
 async def ds_cmd(interaction: discord.Interaction):
@@ -1475,6 +1621,12 @@ async def ds_cmd(interaction: discord.Interaction):
                 value="Draft alkaa pian...",
                 inline=False,
             )
+        qlines = await format_queue_lines(interaction, st.queue, st.queue_joined_at)
+        embed.add_field(
+            name=f"Jonossa ({len(qlines)})",
+            value="\n".join(qlines) if qlines else "—",
+            inline=False,
+        )
 
     elif st.draft_active:
         t1_names = [await get_display_name(interaction, u) for u in st.team1]
@@ -1491,7 +1643,7 @@ async def ds_cmd(interaction: discord.Interaction):
         )
 
     else:
-        qnames = [await get_display_name(interaction, u) for u in st.queue]
+        qnames = await format_queue_lines(interaction, st.queue, st.queue_joined_at)
         embed.add_field(
             name=f"Jonossa ({len(qnames)})",
             value="\n".join(qnames),
@@ -1604,7 +1756,7 @@ async def reset_cmd(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_guild:
         return await interaction.response.send_message("Vain ylläpito voi nollata jonon.", ephemeral=True)
     st = bot.get_state(interaction.guild_id)
-    st.queue.clear(); st.ready_users.clear(); st.readycheck_active = False
+    st.queue.clear(); st.queue_joined_at.clear(); st.ready_users.clear(); st.readycheck_active = False
     if st.ready_task and not st.ready_task.done():
         st.ready_task.cancel()
     st.draft_active = False
@@ -1625,6 +1777,7 @@ async def filltest_cmd(interaction: discord.Interaction):
 
     if uid not in st.queue:
         st.queue.append(uid)
+        st.queue_joined_at[uid] = datetime.datetime.now(datetime.timezone.utc)
 
     needed = max(0, QUEUE_SIZE - len(st.queue))
 
@@ -1637,6 +1790,7 @@ async def filltest_cmd(interaction: discord.Interaction):
         if fid in st.queue:
             continue
         st.queue.append(fid)
+        st.queue_joined_at[fid] = datetime.datetime.now(datetime.timezone.utc)
         st.fake_users.add(fid)
         added += 1
 
@@ -1693,7 +1847,8 @@ async def pstats_bang(ctx: commands.Context, user: Optional[discord.Member] = No
 @bot.command(name="winrate", aliases=["wr"])
 async def winrate_bang(ctx: commands.Context, *, opponent: Optional[str] = None):
     if opponent is None:
-        return await ctx.reply("Käyttö: `!winrate <nimi tai ID>`")
+        interaction = InteractionShim(ctx)
+        return await send_head_to_head_summary(interaction, ctx.author)
     opponent_user = await resolve_user_from_text(ctx.guild, opponent)
     if not opponent_user:
         return await ctx.reply("En löytänyt vastustajaa annetulla nimellä tai ID:llä.")

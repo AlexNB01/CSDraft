@@ -1554,7 +1554,7 @@ async def send_head_to_head_summary(
     rows = []
     for opponent_id, stats in stats_map.items():
         games = stats["games"]
-        if games <= 0:
+        if games < 5:
             continue
         wr = calculate_winrate(stats["wins"], stats["draws"], games)
         rows.append((opponent_id, stats["wins"], stats["losses"], stats["draws"], games, wr))

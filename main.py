@@ -598,6 +598,61 @@ async def show_teams(interaction: discord.Interaction, st: DraftState):
         ephemeral=False,
     )
 
+async def get_pick_display_name(interaction: discord.Interaction, st: DraftState, uid: int) -> str:
+    return f"test-{uid % 1000000}" if uid in st.fake_users else await get_display_name(interaction, uid)
+
+def _trim_button_label(label: str, max_len: int = 80) -> str:
+    if len(label) <= max_len:
+        return label
+    return f"{label[: max_len - 3]}..."
+
+class PickButton(discord.ui.Button):
+    def __init__(self, uid: int, label: str, row: int):
+        super().__init__(
+            style=discord.ButtonStyle.primary,
+            label=label,
+            row=row,
+            custom_id=f"draft_pick_{uid}",
+        )
+        self.uid = uid
+
+    async def callback(self, interaction: discord.Interaction):
+        view = typing.cast("PickView", self.view)
+        await handle_pick_selection(interaction, view.state, self.uid)
+
+class PickView(discord.ui.View):
+    def __init__(self, state: DraftState, button_data: List[Tuple[int, str]]):
+        super().__init__(timeout=None)
+        self.state = state
+        for idx, (uid, label) in enumerate(button_data):
+            self.add_item(PickButton(uid, _trim_button_label(label), row=idx // 5))
+
+async def build_pick_view(interaction: discord.Interaction, st: DraftState) -> discord.ui.View:
+    button_data = []
+    for uid in st.pick_pool:
+        name = await get_pick_display_name(interaction, st, uid)
+        button_data.append((uid, name))
+    return PickView(st, button_data)
+
+async def handle_pick_selection(interaction: discord.Interaction, st: DraftState, uid: int) -> None:
+    if not st.draft_active:
+        return await interaction.response.send_message("Draft ei ole käynnissä.", ephemeral=True)
+    if st.pick_index >= len(st.pick_order):
+        return await interaction.response.send_message("Kaikki pelaajat on jo valittu.", ephemeral=True)
+
+    team = st.pick_order[st.pick_index]
+    expected_captain = st.captains[0] if team == "team1" else st.captains[1]
+    if interaction.user.id != expected_captain:
+        return await interaction.response.send_message(
+            "Vain vuorossa oleva kapteeni voi valita pelaajan.",
+            ephemeral=True,
+        )
+    if uid not in st.pick_pool:
+        return await interaction.response.send_message("Pelaaja on jo valittu.", ephemeral=True)
+
+    await interaction.response.defer(thinking=False)
+    await _apply_pick(interaction, st, uid, is_autopick=False)
+
 async def announce_next_picker(interaction: discord.Interaction, st: DraftState, prefix: Optional[str] = None):
     if st.pick_index >= len(st.pick_order):
         return
@@ -614,17 +669,18 @@ async def announce_next_picker(interaction: discord.Interaction, st: DraftState,
     content = (
         f"{head}"
         f"Seuraava vuoro: {mention(captain)}\n\n"
-        f"Valitse pelaaja komennolla !pick numero\n\n"
+        f"Valitse pelaaja buttoneilla tai komennolla !pick numero\n\n"
         f"{remaining_block}\n"
     )
+    view = await build_pick_view(interaction, st)
 
     if st.pick_msg:
         try:
-            st.pick_msg = await st.pick_msg.edit(content=content)
+            st.pick_msg = await st.pick_msg.edit(content=content, view=view)
         except Exception:
-            st.pick_msg = await interaction.followup.send(content, ephemeral=False)
+            st.pick_msg = await interaction.followup.send(content, view=view, ephemeral=False)
     else:
-        st.pick_msg = await interaction.followup.send(content, ephemeral=False)
+        st.pick_msg = await interaction.followup.send(content, view=view, ephemeral=False)
 
     await start_pick_timer(interaction, st)
 
@@ -655,7 +711,7 @@ async def start_pick_timer(interaction: discord.Interaction, st: DraftState):
 async def build_remaining_block(interaction: discord.Interaction, st: DraftState) -> str:
     lines = []
     for u in st.pick_pool:
-        name = await get_display_name(interaction, u) if u not in st.fake_users else f"test-{u % 1000000}"
+        name = await get_pick_display_name(interaction, st, u)
         num = st.number_by_uid.get(u, "?")
         lines.append(f"{num} - {name}")
     return "```\nValittavissa:\n" + "\n".join(lines) + "\n```" if lines else "```\nValittavissa:\n(ei ketään)\n```"
@@ -721,7 +777,7 @@ async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int
     st.pick_index += 1
 
     team_num = 1 if current_team == "team1" else 2
-    picked_name = f"test-{uid % 1000000}" if uid in st.fake_users else await get_display_name(interaction, uid)
+    picked_name = await get_pick_display_name(interaction, st, uid)
     st.last_pick_prefix = f"Pelaaja {picked_name} lisätty tiimiin {team_num}."
 
     if st.timer_msg:
@@ -749,6 +805,13 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
             last_uid = st.pick_pool.pop()
             st.team1.append(last_uid)
             await bot.db.bump_first_last(last_uid, last=True)
+
+        if st.pick_msg:
+            try:
+                await st.pick_msg.edit(view=None)
+            except Exception:
+                pass
+            st.pick_msg = None
 
         game_id = await bot.db.record_game(interaction.guild_id, st.team1, st.team2)
         st.game_id = game_id
@@ -1357,16 +1420,6 @@ async def start_draft(interaction: discord.Interaction):
 @app_commands.describe(number="Valittavan pelaajan numero")
 async def pick_cmd(interaction: discord.Interaction, number: int):
     st = bot.get_state(interaction.guild_id)
-    if not st.draft_active:
-        return await interaction.response.send_message("Draft ei ole käynnissä.", ephemeral=True)
-    if st.pick_index >= len(st.pick_order):
-        return await interaction.response.send_message("Kaikki pelaajat on jo valittu.", ephemeral=True)
-
-    team = st.pick_order[st.pick_index]
-    expected_captain = st.captains[0] if team == "team1" else st.captains[1]
-    if interaction.user.id != expected_captain:
-        return await interaction.response.send_message("Ei ole sinun vuorosi valita.", ephemeral=True)
-
     uid = None
     for k, v in st.number_by_uid.items():
         if v == number:
@@ -1375,35 +1428,7 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
     if uid is None or uid not in st.pick_pool:
         return await interaction.response.send_message("Virheellinen numero tai pelaaja on jo valittu.", ephemeral=True)
 
-    await interaction.response.defer(thinking=False)
-
-    target_team = st.team1 if team == "team1" else st.team2
-    target_team.append(uid)
-    st.pick_pool.remove(uid)
-
-    if st.pick_index == 0:
-        await bot.db.bump_first_last(uid, first=True)
-
-    st.pick_index += 1
-
-    if st.pick_timer_task and not st.pick_timer_task.done():
-        st.pick_timer_task.cancel()
-    st.pick_timer_task = None
-
-    if st.timer_msg:
-        try:
-            await st.timer_msg.delete()
-        except Exception:
-            pass
-    st.timer_msg = None
-
-    st.pick_msg = None
-
-    team_num = 1 if team == "team1" else 2
-    name = f"test-{uid % 1000000}" if uid in st.fake_users else await get_display_name(interaction, uid)
-    st.last_pick_prefix = f"Pelaaja {name} lisätty tiimiin {team_num}."
-    
-    await _finish_or_next(interaction, st)
+    await handle_pick_selection(interaction, st, uid)
 
 @bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2; 0=tasan)")
 @app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")

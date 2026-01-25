@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS players (
   user_id INTEGER PRIMARY KEY,
   games_played INTEGER NOT NULL DEFAULT 0,
   wins INTEGER NOT NULL DEFAULT 0,
+  captain_wins INTEGER NOT NULL DEFAULT 0,
   captain_count INTEGER NOT NULL DEFAULT 0,
   first_pick_count INTEGER NOT NULL DEFAULT 0,
   last_pick_count INTEGER NOT NULL DEFAULT 0
@@ -139,6 +140,8 @@ CREATE TABLE IF NOT EXISTS games (
   guild_id INTEGER NOT NULL,
   team1 TEXT NOT NULL,  -- JSON array of user_ids
   team2 TEXT NOT NULL,  -- JSON array of user_ids
+  captain1 INTEGER,
+  captain2 INTEGER,
   winner INTEGER,       -- 1 or 2, NULL if unset
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -161,6 +164,10 @@ CREATE TABLE IF NOT EXISTS rating_history (
   created_at TEXT NOT NULL,
   UNIQUE(game_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS captain_opt_out (
+  user_id INTEGER PRIMARY KEY
+);
 """
 
 class DB:
@@ -171,6 +178,18 @@ class DB:
     async def init(self):
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA_SQL)
+            try:
+                await db.execute("ALTER TABLE players ADD COLUMN captain_wins INTEGER NOT NULL DEFAULT 0")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE games ADD COLUMN captain1 INTEGER")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE games ADD COLUMN captain2 INTEGER")
+            except aiosqlite.OperationalError:
+                pass
             await db.commit()
 
     async def ensure_player(self, user_id: int):
@@ -211,6 +230,45 @@ class DB:
             )
             rows = await cur.fetchall()
         return [(int(uid), float(rating), int(games), float(rd)) for uid, rating, games, rd in rows]
+
+    async def get_games_played(self, user_ids: List[int]) -> Dict[int, int]:
+        if not user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in user_ids)
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                f"SELECT user_id, games_played FROM players WHERE user_id IN ({placeholders})",
+                tuple(user_ids),
+            )
+            rows = await cur.fetchall()
+        return {int(uid): int(games) for uid, games in rows}
+
+    async def get_captain_opt_outs(self, user_ids: List[int]) -> Set[int]:
+        if not user_ids:
+            return set()
+        placeholders = ",".join("?" for _ in user_ids)
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                f"SELECT user_id FROM captain_opt_out WHERE user_id IN ({placeholders})",
+                tuple(user_ids),
+            )
+            rows = await cur.fetchall()
+        return {int(uid) for (uid,) in rows}
+
+    async def set_captain_opt_out(self, user_id: int, opted_out: bool) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                if opted_out:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO captain_opt_out (user_id) VALUES (?)",
+                        (user_id,),
+                    )
+                else:
+                    await db.execute(
+                        "DELETE FROM captain_opt_out WHERE user_id = ?",
+                        (user_id,),
+                    )
+                await db.commit()
 
     async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
         async with aiosqlite.connect(self.path) as db:
@@ -405,7 +463,14 @@ class DB:
                 )
                 await db.commit()
 
-    async def record_game(self, guild_id: int, team1: List[int], team2: List[int]) -> int:
+    async def record_game(
+        self,
+        guild_id: int,
+        team1: List[int],
+        team2: List[int],
+        captain1: Optional[int] = None,
+        captain2: Optional[int] = None,
+    ) -> int:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 for uid in team1 + team2:
@@ -415,8 +480,8 @@ class DB:
                         (uid,),
                     )
                 cur = await db.execute(
-                    "INSERT INTO games (guild_id, team1, team2) VALUES (?,?,?)",
-                    (guild_id, json.dumps(team1), json.dumps(team2)),
+                    "INSERT INTO games (guild_id, team1, team2, captain1, captain2) VALUES (?,?,?,?,?)",
+                    (guild_id, json.dumps(team1), json.dumps(team2), captain1, captain2),
                 )
                 await db.commit()
                 return cur.lastrowid
@@ -427,7 +492,7 @@ class DB:
 
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
-                cur = await db.execute("SELECT team1, team2, winner FROM games WHERE id=?", (game_id,))
+                cur = await db.execute("SELECT team1, team2, winner, captain1, captain2 FROM games WHERE id=?", (game_id,))
                 row = await cur.fetchone()
                 if not row:
                     raise ValueError("Peliä ei löytynyt tällä ID:llä.")
@@ -435,12 +500,20 @@ class DB:
                 team1 = json.loads(row[0])
                 team2 = json.loads(row[1])
                 previous_winner = row[2]
+                captain1 = row[3]
+                captain2 = row[4]
 
                 if previous_winner is None:
                     await db.execute("UPDATE games SET winner=? WHERE id=?", (winner_team, game_id))
                     winners = team1 if winner_team == 1 else team2
                     for uid in winners:
                         await db.execute("UPDATE players SET wins = wins + 1 WHERE user_id = ?", (uid,))
+                    winning_captain = captain1 if winner_team == 1 else captain2
+                    if winning_captain is not None:
+                        await db.execute(
+                            "UPDATE players SET captain_wins = captain_wins + 1 WHERE user_id = ?",
+                            (winning_captain,),
+                        )
                     result = "team1_win" if winner_team == 1 else "team2_win"
                     await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result)
                     await db.commit()
@@ -452,14 +525,27 @@ class DB:
                 if previous_winner == winner_team:
                     await db.commit()
                     return team1, team2
-                    
+
                 prev_winners = team1 if previous_winner == 1 else team2
                 new_winners  = team1 if winner_team == 1 else team2
 
-                for uid in prev_winners:
-                    await db.execute("UPDATE players SET wins = wins - 1 WHERE user_id = ?", (uid,))
+                if previous_winner in (1, 2):
+                    for uid in prev_winners:
+                        await db.execute("UPDATE players SET wins = wins - 1 WHERE user_id = ?", (uid,))
+                    prev_captain = captain1 if previous_winner == 1 else captain2
+                    if prev_captain is not None:
+                        await db.execute(
+                            "UPDATE players SET captain_wins = captain_wins - 1 WHERE user_id = ?",
+                            (prev_captain,),
+                        )
                 for uid in new_winners:
                     await db.execute("UPDATE players SET wins = wins + 1 WHERE user_id = ?", (uid,))
+                new_captain = captain1 if winner_team == 1 else captain2
+                if new_captain is not None:
+                    await db.execute(
+                        "UPDATE players SET captain_wins = captain_wins + 1 WHERE user_id = ?",
+                        (new_captain,),
+                    )
 
                 await db.execute("UPDATE games SET winner=? WHERE id=?", (winner_team, game_id))
                 await self._rollback_ratings_for_game_tx(db, game_id)
@@ -471,7 +557,7 @@ class DB:
     async def set_draw(self, game_id: int, overwrite: bool = False) -> Tuple[List[int], List[int]]:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
-                cur = await db.execute("SELECT team1, team2, winner FROM games WHERE id=?", (game_id,))
+                cur = await db.execute("SELECT team1, team2, winner, captain1, captain2 FROM games WHERE id=?", (game_id,))
                 row = await cur.fetchone()
                 if not row:
                     raise ValueError("Peliä ei löytynyt tällä ID:llä.")
@@ -479,6 +565,8 @@ class DB:
                 team1 = json.loads(row[0])
                 team2 = json.loads(row[1])
                 previous_winner = row[2]
+                captain1 = row[3]
+                captain2 = row[4]
 
                 if previous_winner is None:
                     await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
@@ -492,6 +580,12 @@ class DB:
                     prev_winners = team1 if previous_winner == 1 else team2
                     for uid in prev_winners:
                         await db.execute("UPDATE players SET wins = wins - 1 WHERE user_id = ?", (uid,))
+                    prev_captain = captain1 if previous_winner == 1 else captain2
+                    if prev_captain is not None:
+                        await db.execute(
+                            "UPDATE players SET captain_wins = captain_wins - 1 WHERE user_id = ?",
+                            (prev_captain,),
+                        )
                     await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
                     await self._rollback_ratings_for_game_tx(db, game_id)
                     await self._apply_ratings_for_game_tx(db, game_id, team1, team2, "draw")
@@ -1070,7 +1164,9 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
                 pass
             st.pick_msg = None
 
-        game_id = await bot.db.record_game(interaction.guild_id, st.team1, st.team2)
+        captain1 = st.captains[0] if st.captains else None
+        captain2 = st.captains[1] if st.captains else None
+        game_id = await bot.db.record_game(interaction.guild_id, st.team1, st.team2, captain1, captain2)
         st.game_id = game_id
 
         await backup_db()
@@ -1629,6 +1725,8 @@ async def start_draft(interaction: discord.Interaction):
     if len(st.queue) < QUEUE_SIZE:
         return await interaction.followup.send("Liian vähän pelaajia draftiin.")
 
+    captain_min_games = 20
+
     st.readycheck_active = False
     st.ready_users.clear()
 
@@ -1648,10 +1746,23 @@ async def start_draft(interaction: discord.Interaction):
     pool = st.queue[:QUEUE_SIZE]
     random.shuffle(pool)
     real_pool = [u for u in pool if u not in st.fake_users]
-    if len(real_pool) >= 2:
-        c1, c2 = real_pool[0], real_pool[1]
+    games_played = await bot.db.get_games_played(real_pool)
+    opt_outs = await bot.db.get_captain_opt_outs(real_pool)
+    eligible = [
+        uid
+        for uid in real_pool
+        if games_played.get(uid, 0) >= captain_min_games and uid not in opt_outs
+    ]
+    if len(eligible) >= 2:
+        c1, c2 = eligible[0], eligible[1]
+    elif len(real_pool) >= 2:
+        await interaction.followup.send(
+            "Ei tarpeeksi kapteeniehdokkaita (min 20 peliä, ei captaindiestiä)."
+        )
+        return
     else:
-        c1, c2 = pool[0], pool[1]
+        await interaction.followup.send("Liian vähän pelaajia kapteenivalintaan.")
+        return
 
     st.captains = (c1, c2)
     st.team1 = [c1]
@@ -2070,14 +2181,19 @@ async def winners_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="captains", description="Eniten kapteenina toimineet (Top 10)")
 async def captains_cmd(interaction: discord.Interaction):
-    rows = await bot.db.leaderboard("captain_count", 10)
+    async with aiosqlite.connect(bot.db.path) as db:
+        cur = await db.execute(
+            "SELECT user_id, captain_count, captain_wins FROM players ORDER BY captain_count DESC, captain_wins DESC, user_id ASC LIMIT 10"
+        )
+        rows = await cur.fetchall()
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
     lines = []
-    for i, (uid, count, _, _) in enumerate(rows, start=1):
+    for i, (uid, count, captain_wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        lines.append(f"{i}. {name} / {count}")
+        winrate = (captain_wins / count * 100.0) if count else 0.0
+        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -2127,6 +2243,16 @@ async def reset_cmd(interaction: discord.Interaction):
     st.last_pick_prefix = None
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
+
+@bot.tree.command(name="nocaptain", description="Estä bottia valitsemasta sinua kapteeniksi")
+async def nocaptain_cmd(interaction: discord.Interaction):
+    await bot.db.set_captain_opt_out(interaction.user.id, True)
+    await interaction.response.send_message("Sinua ei enää valita kapteeniksi.", ephemeral=True)
+
+@bot.tree.command(name="allowcaptain", description="Salli botin valita sinut kapteeniksi")
+async def allowcaptain_cmd(interaction: discord.Interaction):
+    await bot.db.set_captain_opt_out(interaction.user.id, False)
+    await interaction.response.send_message("Sinut voidaan jälleen valita kapteeniksi.", ephemeral=True)
 
 @bot.tree.command(name="recalcelo", description="Laske Elo-pisteet uudelleen kaikista peleistä (admin)")
 async def recalcelo_cmd(interaction: discord.Interaction):
@@ -2264,6 +2390,14 @@ async def setdraw_bang(ctx: commands.Context, game_id: int = None):
     if game_id is None:
         return await ctx.reply("Käyttö: `!setdraw <peli_id>`")
     await setwinner_cmd.callback(InteractionShim(ctx), game_id, 0)
+
+@bot.command(name="nocaptain")
+async def nocaptain_bang(ctx: commands.Context):
+    await nocaptain_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="allowcaptain")
+async def allowcaptain_bang(ctx: commands.Context):
+    await allowcaptain_cmd.callback(InteractionShim(ctx))
 
 @bot.command(name="elo")
 async def elo_bang(ctx: commands.Context, user: Optional[discord.Member] = None):

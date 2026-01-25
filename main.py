@@ -39,7 +39,7 @@ ELO_MIN_GAMES = 10
 BASE_MATCH_DELTA = 25.0
 MAX_MATCH_DELTA = 30.0
 MAX_DRAW_DELTA = 5.0
-TEAM_RATING_AGGREGATION = "median"
+TEAM_RATING_AGGREGATION = "average"
 
 def build_stats_embed(
     bot_name: str,
@@ -281,8 +281,8 @@ class DB:
         team1_ratings = [ratings_map[uid][0] for uid in team1_ids]
         team2_ratings = [ratings_map[uid][0] for uid in team2_ids]
 
-        team1_rating = median(team1_ratings)
-        team2_rating = median(team2_ratings)
+        team1_rating = average(team1_ratings)
+        team2_rating = average(team2_ratings)
 
         exp_team1 = self._expected_score(team1_rating, team2_rating)
         exp_team2 = 1.0 - exp_team1
@@ -742,6 +742,11 @@ def median(values: List[float]) -> float:
         return float(ordered[mid])
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
+def average(values: List[float]) -> float:
+    if not values:
+        raise ValueError("Average requires at least one value.")
+    return sum(values) / len(values)
+
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -947,11 +952,13 @@ async def start_pick_timer(interaction: discord.Interaction, st: DraftState):
 
 
 async def build_remaining_block(interaction: discord.Interaction, st: DraftState) -> str:
+    rating_rows = await bot.db.get_rating_rows(st.pick_pool)
     lines = []
     for u in st.pick_pool:
         name = await get_pick_display_name(interaction, st, u)
         num = st.number_by_uid.get(u, "?")
-        lines.append(f"{num} - {name}")
+        rating, _games, _rd = rating_rows.get(u, (INITIAL_RATING, 0, RD_MAX))
+        lines.append(f"{num} - {name} ({int(round(rating))})")
     return "```\nValittavissa:\n" + "\n".join(lines) + "\n```" if lines else "```\nValittavissa:\n(ei ketään)\n```"
 
 async def _run_pick_countdown(interaction: discord.Interaction, st: DraftState, seq: int):
@@ -1056,12 +1063,26 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
 
         await backup_db()
 
+        rating_rows = await bot.db.get_rating_rows(st.team1 + st.team2)
+        team1_ratings = [
+            rating_rows.get(uid, (INITIAL_RATING, 0, RD_MAX))[0]
+            for uid in st.team1
+        ]
+        team2_ratings = [
+            rating_rows.get(uid, (INITIAL_RATING, 0, RD_MAX))[0]
+            for uid in st.team2
+        ]
+        team1_avg = average(team1_ratings) if team1_ratings else INITIAL_RATING
+        team2_avg = average(team2_ratings) if team2_ratings else INITIAL_RATING
+
         names1 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team1 ]
         names2 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team2 ]
 
         emb = discord.Embed(title="Valitut joukkueet", color=EMBED_COLOR_PRIMARY)
         emb.add_field(name="Team1:", value=("\n".join(names1) if names1 else "-"), inline=True)
         emb.add_field(name="Team2:", value=("\n".join(names2) if names2 else "-"), inline=True)
+        emb.add_field(name="Team1 avg Elo", value=str(int(round(team1_avg))), inline=True)
+        emb.add_field(name="Team2 avg Elo", value=str(int(round(team2_avg))), inline=True)
         emb.set_footer(text="CSDraft by Alex")
 
         await interaction.followup.send(

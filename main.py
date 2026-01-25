@@ -1934,7 +1934,6 @@ async def elo_cmd(interaction: discord.Interaction, user: Optional[discord.User]
         color=EMBED_COLOR_PRIMARY,
     )
     embed.add_field(name="Rating", value=str(int(round(rating))), inline=True)
-    embed.add_field(name="RD", value=str(int(round(rd))), inline=True)
     embed.add_field(name="Pelit", value=str(int(elo_games)), inline=True)
     if elo_games < ELO_MIN_GAMES:
         embed.add_field(name="Status", value=f"Provisional (min {ELO_MIN_GAMES} peliä)", inline=False)
@@ -1957,7 +1956,7 @@ async def topelo_cmd(interaction: discord.Interaction):
         lines.append(f"{i}. {name} — {int(round(rating))} ({games} peliä)")
 
     embed = discord.Embed(
-        title=f"Top 10 Elo (min {ELO_MIN_GAMES} peliä)",
+        title="Top 10 Elo",
         description="\n".join(lines),
         color=EMBED_COLOR_PRIMARY,
     )

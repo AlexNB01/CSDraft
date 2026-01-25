@@ -212,6 +212,15 @@ class DB:
             rows = await cur.fetchall()
         return [(int(uid), float(rating), int(games), float(rd)) for uid, rating, games, rd in rows]
 
+    async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT user_id, delta FROM rating_history WHERE game_id = ?",
+                (str(game_id),),
+            )
+            rows = await cur.fetchall()
+        return {int(uid): float(delta) for uid, delta in rows}
+
     async def _rollback_ratings_for_game_tx(self, db: aiosqlite.Connection, game_id: int) -> None:
         cur = await db.execute(
             "SELECT user_id, pre_rating, pre_rd FROM rating_history WHERE game_id = ?",
@@ -1671,6 +1680,23 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
         elif winner in (1, 2):
             team1, team2 = await bot.db.set_winner(game_id, winner, overwrite=overwrite)
             msg_text = f"Voittaja (team {winner}) tallennettu pelille `{game_id}`."
+
+            rating_changes = await bot.db.get_rating_changes_for_game(game_id)
+            if rating_changes:
+                async def build_team_changes(team_ids: List[int]) -> str:
+                    parts = []
+                    for uid in team_ids:
+                        if uid not in rating_changes:
+                            continue
+                        name = await get_display_name(interaction, uid)
+                        delta = rating_changes[uid]
+                        sign = "+" if delta >= 0 else ""
+                        parts.append(f"{name} ({sign}{int(round(delta))})")
+                    return ", ".join(parts) if parts else "—"
+
+                team1_changes = await build_team_changes(team1)
+                team2_changes = await build_team_changes(team2)
+                msg_text += f"\nElo-muutokset:\nTeam 1: {team1_changes}\nTeam 2: {team2_changes}"
         else:
             return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
 

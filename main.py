@@ -47,7 +47,9 @@ def build_stats_embed(
     games: int, wins: int, winrate: float,
     captain: int, first_picked: int, last_picked: int,
     r_games: int, r_wins: int, r_captain: int, r_first: int, r_last: int,
-    total_players: int
+    total_players: int,
+    elo_rating: float,
+    r_elo: int
 ) -> discord.Embed:
     emb = discord.Embed(
         title=f"Pelaajatilastot",
@@ -64,6 +66,12 @@ def build_stats_embed(
         name="Voitot",
         value=f"**{display_name}** on voittanut **{wins}** peliä (**{winrate:.1f}%** WR) "
               f"({r_wins}/{total_players})",
+        inline=False
+    )
+    emb.add_field(
+        name="elo",
+        value=f"**{display_name}** elo: **{int(round(elo_rating))}** "
+              f"({r_elo}/{total_players})",
         inline=False
     )
 
@@ -710,6 +718,24 @@ class DB:
                 (higher_count,) = await cur.fetchone()
                 return int(higher_count) + 1
 
+
+    async def get_elo_rank(self, user_id: int) -> int:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                cur = await db.execute("SELECT rating FROM ratings WHERE user_id = ?", (user_id,))
+                row = await cur.fetchone()
+                target = float(row[0]) if row and row[0] is not None else 0.0
+
+                cur = await db.execute("SELECT COUNT(*) FROM ratings")
+                (total_players,) = await cur.fetchone()
+                total_players = int(total_players or 0)
+
+                if target <= 0:
+                    return total_players
+
+                cur = await db.execute("SELECT COUNT(*) FROM ratings WHERE rating > ?", (target,))
+                (higher_count,) = await cur.fetchone()
+                return int(higher_count) + 1
 
     async def count_players(self) -> int:
         async with aiosqlite.connect(self.path) as db:
@@ -1697,6 +1723,7 @@ async def add_cmd(interaction: discord.Interaction):
     if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
         st.readycheck_active = True
         st.ready_users = set()
+        st.ready_users.add(uid)
         mentions = " ".join(mention(u) for u in st.queue)
         view = ReadyCheckButton(bot, interaction.guild_id)
         await interaction.followup.send(
@@ -1789,13 +1816,11 @@ async def start_draft(interaction: discord.Interaction):
         for uid in real_pool
         if games_played.get(uid, 0) >= captain_min_games and uid not in opt_outs
     ]
+    eligible_without_games = [uid for uid in real_pool if uid not in opt_outs]
     if len(eligible) >= 2:
         c1, c2 = eligible[0], eligible[1]
-    elif len(real_pool) >= 2:
-        await interaction.followup.send(
-            "Ei tarpeeksi kapteeniehdokkaita (min 20 peliä, ei captaindiestiä)."
-        )
-        return
+    elif len(eligible_without_games) >= 2:
+        c1, c2 = eligible_without_games[0], eligible_without_games[1]
     else:
         await interaction.followup.send("Liian vähän pelaajia kapteenivalintaan.")
         return
@@ -1863,26 +1888,24 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
 
             rating_history = await bot.db.get_rating_history_for_game(game_id)
             if rating_history:
-                async def build_team_changes(team_ids: List[int]) -> Tuple[str, int]:
+                async def build_team_changes(team_ids: List[int]) -> str:
                     parts = []
-                    team_delta = 0.0
                     for uid in team_ids:
                         if uid not in rating_history:
                             continue
                         name = await get_display_name(interaction, uid)
-                        _pre, post, delta = rating_history[uid]
-                        team_delta += delta
-                        parts.append(f"{name} ({int(round(post))})")
-                    return ", ".join(parts) if parts else "—", int(round(team_delta))
+                        _pre, _post, delta = rating_history[uid]
+                        delta_int = int(round(delta))
+                        delta_sign = "+" if delta_int >= 0 else ""
+                        parts.append(f"{name} ({delta_sign}{delta_int})")
+                    return ", ".join(parts) if parts else "—"
 
-                team1_changes, team1_delta = await build_team_changes(team1)
-                team2_changes, team2_delta = await build_team_changes(team2)
-                team1_sign = "+" if team1_delta >= 0 else ""
-                team2_sign = "+" if team2_delta >= 0 else ""
+                team1_changes = await build_team_changes(team1)
+                team2_changes = await build_team_changes(team2)
                 msg_text += (
                     "\nElo-muutokset:"
-                    f"\nTeam 1 ({team1_sign}{team1_delta}): {team1_changes}"
-                    f"\nTeam 2 ({team2_sign}{team2_delta}): {team2_changes}"
+                    f"\nTeam 1: {team1_changes}"
+                    f"\nTeam 2: {team2_changes}"
                 )
         else:
             return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
@@ -1943,6 +1966,10 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
     r_captain = await bot.db.get_rank("captain_count",    target.id)
     r_first   = await bot.db.get_rank("first_pick_count", target.id)
     r_last    = await bot.db.get_rank("last_pick_count",  target.id)
+    await bot.db.ensure_rating(target.id)
+    rating_row = await bot.db.get_rating_rows([target.id])
+    elo_rating = rating_row.get(target.id, (INITIAL_RATING, 0, RD_MAX))[0]
+    r_elo = await bot.db.get_elo_rank(target.id)
 
     bot_name = bot.user.name if bot.user else "GatherBot"
     emb = build_stats_embed(
@@ -1953,7 +1980,9 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
         first_picked=data["first_pick_count"],
         last_picked=data["last_pick_count"],
         r_games=r_games, r_wins=r_wins, r_captain=r_captain, r_first=r_first, r_last=r_last,
-        total_players=total_players
+        total_players=total_players,
+        elo_rating=elo_rating,
+        r_elo=r_elo
     )
     await interaction.response.send_message(embed=emb)
 
@@ -2225,13 +2254,10 @@ async def captains_cmd(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
-    results_map = await bot.db.get_captain_results([uid for uid, _count in rows])
     lines = []
     for i, (uid, count) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        wins, games = results_map.get(int(uid), (0, 0))
-        winrate = (wins / games * 100.0) if games else 0.0
-        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
+        lines.append(f"{i}. {name} / {count}")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)

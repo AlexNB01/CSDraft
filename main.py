@@ -38,6 +38,7 @@ RD_MAX = 350.0
 ELO_MIN_GAMES = 10
 BASE_MATCH_DELTA = 25.0
 MAX_MATCH_DELTA = 30.0
+MAX_DRAW_DELTA = 5.0
 TEAM_RATING_AGGREGATION = "median"
 
 def build_stats_embed(
@@ -290,7 +291,10 @@ class DB:
             for uid in team_ids:
                 rating, elo_games, rd = ratings_map[uid]
                 delta = BASE_MATCH_DELTA * (score_team - expected_team)
-                delta = _clip(delta, -MAX_MATCH_DELTA, MAX_MATCH_DELTA)
+                if score_team == 0.5:
+                    delta = _clip(delta, -MAX_DRAW_DELTA, MAX_DRAW_DELTA)
+                else:
+                    delta = _clip(delta, -MAX_MATCH_DELTA, MAX_MATCH_DELTA)
                 new_rating = rating + delta
                 new_rd = rd
 

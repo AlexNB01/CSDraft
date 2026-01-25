@@ -35,6 +35,7 @@ INITIAL_RATING = 1000.0
 INITIAL_RD = 350.0
 RD_MIN = 60.0
 RD_MAX = 350.0
+ELO_MIN_GAMES = 10
 
 def build_stats_embed(
     bot_name: str,
@@ -1938,22 +1939,28 @@ async def elo_cmd(interaction: discord.Interaction, user: Optional[discord.User]
     embed.add_field(name="Rating", value=str(int(round(rating))), inline=True)
     embed.add_field(name="RD", value=str(int(round(rd))), inline=True)
     embed.add_field(name="Pelit", value=str(int(elo_games)), inline=True)
+    if elo_games < ELO_MIN_GAMES:
+        embed.add_field(name="Status", value=f"Provisional (min {ELO_MIN_GAMES} peliä)", inline=False)
     embed.set_footer(text=EMBED_FOOTER_TEXT)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="topelo", description="Top 10 Elo-ranking")
 async def topelo_cmd(interaction: discord.Interaction):
-    rows = await bot.db.get_top_ratings(10)
+    rows = await bot.db.get_top_ratings(50)
+    rows = [row for row in rows if row[2] >= ELO_MIN_GAMES]
     if not rows:
-        return await interaction.response.send_message("Ei Elo-dataa vielä.", ephemeral=True)
+        return await interaction.response.send_message(
+            f"Ei Elo-dataa vielä (min {ELO_MIN_GAMES} peliä).",
+            ephemeral=True,
+        )
 
     lines = []
-    for i, (uid, rating, games, _rd) in enumerate(rows, start=1):
+    for i, (uid, rating, games, _rd) in enumerate(rows[:10], start=1):
         name = await get_display_name(interaction, uid)
         lines.append(f"{i}. {name} — {int(round(rating))} ({games} peliä)")
 
     embed = discord.Embed(
-        title="Top 10 Elo",
+        title=f"Top 10 Elo (min {ELO_MIN_GAMES} peliä)",
         description="\n".join(lines),
         color=EMBED_COLOR_PRIMARY,
     )

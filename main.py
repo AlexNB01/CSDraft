@@ -36,6 +36,9 @@ INITIAL_RD = 350.0
 RD_MIN = 60.0
 RD_MAX = 350.0
 ELO_MIN_GAMES = 10
+BASE_MATCH_DELTA = 25.0
+MAX_MATCH_DELTA = 30.0
+TEAM_RATING_AGGREGATION = "median"
 
 def build_stats_embed(
     bot_name: str,
@@ -286,16 +289,10 @@ class DB:
         async def apply_for_team(team_ids: List[int], score_team: float, expected_team: float) -> None:
             for uid in team_ids:
                 rating, elo_games, rd = ratings_map[uid]
-                if elo_games < 20:
-                    k_base = 32
-                elif elo_games < 100:
-                    k_base = 24
-                else:
-                    k_base = 16
-                k_scaled = k_base * _clip(rd / 200.0, 0.6, 1.8)
-                new_rating = rating + k_scaled * (score_team - expected_team)
-                new_rd = max(RD_MIN, rd * 0.95)
-                delta = new_rating - rating
+                delta = BASE_MATCH_DELTA * (score_team - expected_team)
+                delta = _clip(delta, -MAX_MATCH_DELTA, MAX_MATCH_DELTA)
+                new_rating = rating + delta
+                new_rd = rd
 
                 await db.execute(
                     "UPDATE ratings SET rating = ?, elo_games = elo_games + 1, rd = ? WHERE user_id = ?",

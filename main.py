@@ -48,7 +48,8 @@ def build_stats_embed(
     captain: int, first_picked: int, last_picked: int,
     r_games: int, r_wins: int, r_captain: int, r_first: int, r_last: int,
     total_players: int,
-    elo_rating: float
+    elo_rating: float,
+    r_elo: int
 ) -> discord.Embed:
     emb = discord.Embed(
         title=f"Pelaajatilastot",
@@ -68,8 +69,9 @@ def build_stats_embed(
         inline=False
     )
     emb.add_field(
-        name="Elo",
-        value=f"**{display_name}** Elo: **{int(round(elo_rating))}**",
+        name="elo",
+        value=f"**{display_name}** elo: **{int(round(elo_rating))}** "
+              f"({r_elo}/{total_players})",
         inline=False
     )
 
@@ -716,6 +718,24 @@ class DB:
                 (higher_count,) = await cur.fetchone()
                 return int(higher_count) + 1
 
+
+    async def get_elo_rank(self, user_id: int) -> int:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                cur = await db.execute("SELECT rating FROM ratings WHERE user_id = ?", (user_id,))
+                row = await cur.fetchone()
+                target = float(row[0]) if row and row[0] is not None else 0.0
+
+                cur = await db.execute("SELECT COUNT(*) FROM ratings")
+                (total_players,) = await cur.fetchone()
+                total_players = int(total_players or 0)
+
+                if target <= 0:
+                    return total_players
+
+                cur = await db.execute("SELECT COUNT(*) FROM ratings WHERE rating > ?", (target,))
+                (higher_count,) = await cur.fetchone()
+                return int(higher_count) + 1
 
     async def count_players(self) -> int:
         async with aiosqlite.connect(self.path) as db:
@@ -1703,6 +1723,7 @@ async def add_cmd(interaction: discord.Interaction):
     if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
         st.readycheck_active = True
         st.ready_users = set()
+        st.ready_users.add(uid)
         mentions = " ".join(mention(u) for u in st.queue)
         view = ReadyCheckButton(bot, interaction.guild_id)
         await interaction.followup.send(
@@ -1795,13 +1816,11 @@ async def start_draft(interaction: discord.Interaction):
         for uid in real_pool
         if games_played.get(uid, 0) >= captain_min_games and uid not in opt_outs
     ]
+    eligible_without_games = [uid for uid in real_pool if uid not in opt_outs]
     if len(eligible) >= 2:
         c1, c2 = eligible[0], eligible[1]
-    elif len(real_pool) >= 2:
-        await interaction.followup.send(
-            "Ei tarpeeksi kapteeniehdokkaita (min 20 peliä, ei captaindiestiä)."
-        )
-        return
+    elif len(eligible_without_games) >= 2:
+        c1, c2 = eligible_without_games[0], eligible_without_games[1]
     else:
         await interaction.followup.send("Liian vähän pelaajia kapteenivalintaan.")
         return
@@ -1950,6 +1969,7 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
     await bot.db.ensure_rating(target.id)
     rating_row = await bot.db.get_rating_rows([target.id])
     elo_rating = rating_row.get(target.id, (INITIAL_RATING, 0, RD_MAX))[0]
+    r_elo = await bot.db.get_elo_rank(target.id)
 
     bot_name = bot.user.name if bot.user else "GatherBot"
     emb = build_stats_embed(
@@ -1961,7 +1981,8 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
         last_picked=data["last_pick_count"],
         r_games=r_games, r_wins=r_wins, r_captain=r_captain, r_first=r_first, r_last=r_last,
         total_players=total_players,
-        elo_rating=elo_rating
+        elo_rating=elo_rating,
+        r_elo=r_elo
     )
     await interaction.response.send_message(embed=emb)
 

@@ -64,7 +64,7 @@ def build_stats_embed(
         inline=False
     )
     emb.add_field(
-        name="elo",
+        name="Elo",
         value=f"**{display_name}** elo: **{int(round(elo_rating))}** "
               f"({r_elo}/{total_players})",
         inline=False

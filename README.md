@@ -100,7 +100,9 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 
 ### 3. Draft Phase
 
-- Two captains are randomly selected
+- Two captains are selected from eligible players (defaults to 20+ games played; if fewer than two meet the threshold, falls back to anyone who has not opted out)
+- First captain is chosen at random from the eligible pool
+- Second captain is chosen from the remaining eligible pool with the closest Elo rating to the first captain (ties randomized)
 - Captains take turns picking players using `/p <number>`
 - Pick order: Team1 → Team2 → Team1 → Team2 → Team1 → Team2 → Team2
 - Each captain has 45 seconds per pick (auto-pick if timeout)

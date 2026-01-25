@@ -7,7 +7,14 @@ A feature-rich Discord bot for organizing Counter-Strike draft matches with auto
 
 ## Features
 
-A Simple Discord bot for ogranizing CS2 inhouse matches.
+A simple Discord bot for organizing CS2 inhouse matches with:
+
+- Automated queue, readycheck, and captain draft flow
+- Player stats tracking (wins, captain picks, first/last pick counts)
+- Elo ratings with leaderboards
+- Winrate comparisons between players
+- Optional automatic voice channel moves
+- Opt-out controls for captain selection
 
 Please don't let this ruin your friendships too much. :3
 
@@ -53,14 +60,19 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/rm` | `!rm`, `!remove` | Leave the queue |
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
+| `/winrate <user>` | `!winrate`, `!wr` | Compare your winrate against another player |
+| `/elo [user]` | `!elo` | View Elo rating and ranking |
 | `/dstatus` | `!dstatus` | Check current queue/draft status |
 | `/pick <number>` | `!pick`, `!p` | Captain: Pick a player by number |
+| `/nocaptain` | `!nocaptain` | Opt out of being randomly selected as captain |
+| `/allowcaptain` | `!allowcaptain` | Re-allow captain selection |
 
 ### Leaderboard Commands
 
 | Command | Description |
 |---------|-------------|
 | `/top10` | Players with most games |
+| `/topelo` | Top 10 Elo rankings |
 | `/winners` | Players with most wins (sorted by win rate) |
 | `/captains` | Players who've captained most |
 | `/thinkids` | Players picked first most often |
@@ -70,9 +82,10 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 
 | Command | Description |
 |---------|-------------|
-| `/setwinner <game_id> <1\|2>` | Set winning team for a game |
+| `/setwinner <game_id> <1\|2\|0>` | Set winning team for a game (0 = draw) |
 | `/setdraw <game_id>` | Mark game as a draw |
 | `/reset` | Clear queue and draft state (requires Manage Server) |
+| `/recalcelo` | Recalculate Elo from all recorded games |
 | `/filltest` | Fill queue with test players (dev only) |
 
 ## Flow for queue
@@ -114,6 +127,7 @@ The bot uses SQLite with two main tables:
 - `user_id` - Discord user ID (primary key)
 - `games_played` - Total games participated in
 - `wins` - Total wins
+- `captain_wins` - Wins as captain
 - `captain_count` - Times selected as captain
 - `first_pick_count` - Times picked first
 - `last_pick_count` - Times picked last
@@ -124,8 +138,29 @@ The bot uses SQLite with two main tables:
 - `guild_id` - Discord server ID
 - `team1` - JSON array of Team 1 user IDs
 - `team2` - JSON array of Team 2 user IDs
+- `captain1` - Team 1 captain user ID
+- `captain2` - Team 2 captain user ID
 - `winner` - 1, 2, 0 (draw), or NULL (unset)
 - `created_at` - Timestamp
+
+### ratings
+
+- `user_id` - Discord user ID (primary key)
+- `rating` - Elo rating
+- `elo_games` - Elo games counted
+
+### rating_history
+
+- `game_id` - Game ID
+- `user_id` - Discord user ID
+- `pre_rating` - Elo before the match
+- `post_rating` - Elo after the match
+- `delta` - Elo change
+- `created_at` - Timestamp
+
+### captain_opt_out
+
+- `user_id` - Discord user ID (primary key)
 
 Database file: `draftbot.sqlite3`
 Backups: `backups/` directory (last 10 kept)

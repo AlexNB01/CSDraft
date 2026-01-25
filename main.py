@@ -1273,11 +1273,20 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
         names1 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team1 ]
         names2 = [ (f"test-{u % 1000000}" if u in st.fake_users else await get_display_name(interaction, u)) for u in st.team2 ]
 
+        team1_avg_display = int(round(team1_avg))
+        team2_avg_display = int(round(team2_avg))
+
         emb = discord.Embed(title="Valitut joukkueet", color=EMBED_COLOR_PRIMARY)
-        emb.add_field(name="Team1:", value=("\n".join(names1) if names1 else "-"), inline=True)
-        emb.add_field(name="Team2:", value=("\n".join(names2) if names2 else "-"), inline=True)
-        emb.add_field(name="Team1 avg Elo", value=str(int(round(team1_avg))), inline=True)
-        emb.add_field(name="Team2 avg Elo", value=str(int(round(team2_avg))), inline=True)
+        emb.add_field(
+            name=f"Team1 ({team1_avg_display}):",
+            value=("\n".join(names1) if names1 else "-"),
+            inline=True,
+        )
+        emb.add_field(
+            name=f"Team2 ({team2_avg_display}):",
+            value=("\n".join(names2) if names2 else "-"),
+            inline=True,
+        )
         emb.set_footer(text="CSDraft by Alex")
 
         await interaction.followup.send(

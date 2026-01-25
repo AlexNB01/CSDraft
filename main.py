@@ -1913,24 +1913,28 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
 
             rating_history = await bot.db.get_rating_history_for_game(game_id)
             if rating_history:
-                async def build_team_changes(team_ids: List[int]) -> str:
+                async def build_team_changes(team_ids: List[int]) -> Tuple[str, int]:
                     parts = []
+                    team_delta = None
                     for uid in team_ids:
                         if uid not in rating_history:
                             continue
                         name = await get_display_name(interaction, uid)
-                        _pre, _post, delta = rating_history[uid]
+                        _pre, post, delta = rating_history[uid]
                         delta_int = int(round(delta))
-                        delta_sign = "+" if delta_int >= 0 else ""
-                        parts.append(f"{name} ({delta_sign}{delta_int})")
-                    return ", ".join(parts) if parts else "—"
+                        if team_delta is None:
+                            team_delta = delta_int
+                        parts.append(f"{name} ({int(round(post))})")
+                    return (", ".join(parts) if parts else "—", team_delta or 0)
 
-                team1_changes = await build_team_changes(team1)
-                team2_changes = await build_team_changes(team2)
+                team1_changes, team1_delta = await build_team_changes(team1)
+                team2_changes, team2_delta = await build_team_changes(team2)
+                team1_sign = "+" if team1_delta >= 0 else ""
+                team2_sign = "+" if team2_delta >= 0 else ""
                 msg_text += (
                     "\nElo-muutokset:"
-                    f"\nTeam 1: {team1_changes}"
-                    f"\nTeam 2: {team2_changes}"
+                    f"\nTeam 1 ({team1_sign}{team1_delta}): {team1_changes}"
+                    f"\nTeam 2 ({team2_sign}{team2_delta}): {team2_changes}"
                 )
         else:
             return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)

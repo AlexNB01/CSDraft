@@ -2199,6 +2199,19 @@ async def setdraw_bang(ctx: commands.Context, game_id: int = None):
         return await ctx.reply("Käyttö: `!setdraw <peli_id>`")
     await setwinner_cmd.callback(InteractionShim(ctx), game_id, 0)
 
+@bot.command(name="elo")
+async def elo_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
+    interaction = InteractionShim(ctx)
+    await elo_cmd.callback(interaction, user or ctx.author)
+
+@bot.command(name="topelo")
+async def topelo_bang(ctx: commands.Context):
+    await topelo_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="recalcelo")
+async def recalcelo_bang(ctx: commands.Context):
+    await recalcelo_cmd.callback(InteractionShim(ctx))
+
 # -----------------------------
 # Käynnistys :3
 # -----------------------------

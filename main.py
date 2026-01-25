@@ -30,6 +30,12 @@ VOICE_LOBBY_CHANNEL_ID = 364497233061871628
 EMBED_COLOR_PRIMARY = 0x29377e
 EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 
+# ---- Elo settings ----
+INITIAL_RATING = 1000.0
+INITIAL_RD = 350.0
+RD_MIN = 60.0
+RD_MAX = 350.0
+
 def build_stats_embed(
     bot_name: str,
     display_name: str,
@@ -131,6 +137,25 @@ CREATE TABLE IF NOT EXISTS games (
   winner INTEGER,       -- 1 or 2, NULL if unset
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS ratings (
+  user_id TEXT PRIMARY KEY,
+  rating REAL NOT NULL,
+  elo_games INTEGER NOT NULL,
+  rd REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rating_history (
+  game_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  pre_rating REAL NOT NULL,
+  post_rating REAL NOT NULL,
+  delta REAL NOT NULL,
+  pre_rd REAL NOT NULL,
+  post_rd REAL NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(game_id, user_id)
+);
 """
 
 class DB:
@@ -151,6 +176,188 @@ class DB:
                     (user_id,),
                 )
                 await db.commit()
+
+    async def ensure_rating(self, user_id: int):
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT OR IGNORE INTO ratings (user_id, rating, elo_games, rd) VALUES (?, ?, ?, ?)",
+                    (user_id, INITIAL_RATING, 0, RD_MAX),
+                )
+                await db.commit()
+
+    async def get_rating_rows(self, user_ids: List[int]) -> Dict[int, Tuple[float, int, float]]:
+        if not user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in user_ids)
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                f"SELECT user_id, rating, elo_games, rd FROM ratings WHERE user_id IN ({placeholders})",
+                tuple(user_ids),
+            )
+            rows = await cur.fetchall()
+        return {int(uid): (float(rating), int(games), float(rd)) for uid, rating, games, rd in rows}
+
+    async def get_top_ratings(self, limit: int = 10) -> List[Tuple[int, float, int, float]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT user_id, rating, elo_games, rd FROM ratings ORDER BY rating DESC, elo_games DESC, user_id ASC LIMIT ?",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+        return [(int(uid), float(rating), int(games), float(rd)) for uid, rating, games, rd in rows]
+
+    async def _rollback_ratings_for_game_tx(self, db: aiosqlite.Connection, game_id: int) -> None:
+        cur = await db.execute(
+            "SELECT user_id, pre_rating, pre_rd FROM rating_history WHERE game_id = ?",
+            (str(game_id),),
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            return
+
+        for user_id, pre_rating, pre_rd in rows:
+            await db.execute(
+                "INSERT OR IGNORE INTO ratings (user_id, rating, elo_games, rd) VALUES (?, ?, ?, ?)",
+                (user_id, pre_rating, 0, pre_rd),
+            )
+            await db.execute(
+                "UPDATE ratings SET rating = ?, rd = ?, elo_games = CASE WHEN elo_games > 0 THEN elo_games - 1 ELSE 0 END WHERE user_id = ?",
+                (pre_rating, pre_rd, user_id),
+            )
+
+        await db.execute("DELETE FROM rating_history WHERE game_id = ?", (str(game_id),))
+
+    async def rollback_ratings_for_game(self, game_id: int) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("BEGIN")
+                await self._rollback_ratings_for_game_tx(db, game_id)
+                await db.commit()
+
+    def _expected_score(self, rating_a: float, rating_b: float) -> float:
+        return 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
+
+    async def _apply_ratings_for_game_tx(
+        self,
+        db: aiosqlite.Connection,
+        game_id: int,
+        team1_ids: List[int],
+        team2_ids: List[int],
+        result: str,
+    ) -> None:
+        if result not in {"team1_win", "team2_win", "draw"}:
+            raise ValueError("Tuntematon ottelutulos.")
+
+        for uid in team1_ids + team2_ids:
+            await db.execute(
+                "INSERT OR IGNORE INTO ratings (user_id, rating, elo_games, rd) VALUES (?, ?, ?, ?)",
+                (uid, INITIAL_RATING, 0, RD_MAX),
+            )
+
+        all_ids = team1_ids + team2_ids
+        placeholders = ",".join("?" for _ in all_ids)
+        cur = await db.execute(
+            f"SELECT user_id, rating, elo_games, rd FROM ratings WHERE user_id IN ({placeholders})",
+            tuple(all_ids),
+        )
+        rows = await cur.fetchall()
+        ratings_map = {int(uid): (float(rating), int(games), float(rd)) for uid, rating, games, rd in rows}
+
+        team1_ratings = [ratings_map[uid][0] for uid in team1_ids]
+        team2_ratings = [ratings_map[uid][0] for uid in team2_ids]
+
+        team1_rating = median(team1_ratings)
+        team2_rating = median(team2_ratings)
+
+        exp_team1 = self._expected_score(team1_rating, team2_rating)
+        exp_team2 = 1.0 - exp_team1
+
+        if result == "team1_win":
+            score_team1, score_team2 = 1.0, 0.0
+        elif result == "team2_win":
+            score_team1, score_team2 = 0.0, 1.0
+        else:
+            score_team1 = score_team2 = 0.5
+
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        async def apply_for_team(team_ids: List[int], score_team: float, expected_team: float) -> None:
+            for uid in team_ids:
+                rating, elo_games, rd = ratings_map[uid]
+                if elo_games < 20:
+                    k_base = 32
+                elif elo_games < 100:
+                    k_base = 24
+                else:
+                    k_base = 16
+                k_scaled = k_base * _clip(rd / 200.0, 0.6, 1.8)
+                new_rating = rating + k_scaled * (score_team - expected_team)
+                new_rd = max(RD_MIN, rd * 0.95)
+                delta = new_rating - rating
+
+                await db.execute(
+                    "UPDATE ratings SET rating = ?, elo_games = elo_games + 1, rd = ? WHERE user_id = ?",
+                    (new_rating, new_rd, uid),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO rating_history
+                    (game_id, user_id, pre_rating, post_rating, delta, pre_rd, post_rd, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(game_id),
+                        uid,
+                        rating,
+                        new_rating,
+                        delta,
+                        rd,
+                        new_rd,
+                        timestamp,
+                    ),
+                )
+
+        await apply_for_team(team1_ids, score_team1, exp_team1)
+        await apply_for_team(team2_ids, score_team2, exp_team2)
+
+    async def apply_ratings_for_game(
+        self,
+        game_id: int,
+        team1_ids: List[int],
+        team2_ids: List[int],
+        result: str,
+    ) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("BEGIN")
+                await self._apply_ratings_for_game_tx(db, game_id, team1_ids, team2_ids, result)
+                await db.commit()
+
+    async def recalc_all_ratings_from_history(self) -> int:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("BEGIN")
+                await db.execute("DELETE FROM rating_history")
+                await db.execute("DELETE FROM ratings")
+
+                cur = await db.execute(
+                    "SELECT id, team1, team2, winner FROM games WHERE winner IS NOT NULL ORDER BY created_at ASC, id ASC"
+                )
+                games = await cur.fetchall()
+                for game_id, team1_raw, team2_raw, winner in games:
+                    team1 = json.loads(team1_raw)
+                    team2 = json.loads(team2_raw)
+                    if winner == 1:
+                        result = "team1_win"
+                    elif winner == 2:
+                        result = "team2_win"
+                    else:
+                        result = "draw"
+                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result)
+
+                await db.commit()
+                return len(games)
 
     async def bump_captain(self, user_id: int, delta: int = 1):
         await self.ensure_player(user_id)
@@ -211,6 +418,8 @@ class DB:
                     winners = team1 if winner_team == 1 else team2
                     for uid in winners:
                         await db.execute("UPDATE players SET wins = wins + 1 WHERE user_id = ?", (uid,))
+                    result = "team1_win" if winner_team == 1 else "team2_win"
+                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result)
                     await db.commit()
                     return team1, team2
 
@@ -230,6 +439,9 @@ class DB:
                     await db.execute("UPDATE players SET wins = wins + 1 WHERE user_id = ?", (uid,))
 
                 await db.execute("UPDATE games SET winner=? WHERE id=?", (winner_team, game_id))
+                await self._rollback_ratings_for_game_tx(db, game_id)
+                result = "team1_win" if winner_team == 1 else "team2_win"
+                await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result)
                 await db.commit()
                 return team1, team2
 
@@ -247,6 +459,7 @@ class DB:
 
                 if previous_winner is None:
                     await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
+                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, "draw")
                     await db.commit()
                     return team1, team2
 
@@ -257,6 +470,8 @@ class DB:
                     for uid in prev_winners:
                         await db.execute("UPDATE players SET wins = wins - 1 WHERE user_id = ?", (uid,))
                     await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
+                    await self._rollback_ratings_for_game_tx(db, game_id)
+                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, "draw")
                     await db.commit()
                     return team1, team2
 
@@ -506,6 +721,18 @@ def format_elapsed(seconds: float) -> str:
     if sec or not parts:
         parts.append(f"{sec}s")
     return " ".join(parts)
+
+def median(values: List[float]) -> float:
+    if not values:
+        raise ValueError("Median requires at least one value.")
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+def _clip(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 async def format_queue_lines(
     interaction: discord.Interaction,
@@ -1695,6 +1922,44 @@ async def top10_cmd(interaction: discord.Interaction):
     emb.set_footer(text=EMBED_FOOTER_TEXT)
     await interaction.response.send_message(embed=emb)
 
+@bot.tree.command(name="elo", description="Näytä pelaajan Elo-luku")
+@app_commands.describe(user="Valinnainen: käyttäjä, jonka Elo näytetään")
+async def elo_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
+    target = user or interaction.user
+    await bot.db.ensure_rating(target.id)
+    rows = await bot.db.get_rating_rows([target.id])
+    rating, elo_games, rd = rows.get(target.id, (INITIAL_RATING, 0, RD_MAX))
+
+    name = await get_display_name(interaction, target.id)
+    embed = discord.Embed(
+        title=f"Elo: {name}",
+        color=EMBED_COLOR_PRIMARY,
+    )
+    embed.add_field(name="Rating", value=str(int(round(rating))), inline=True)
+    embed.add_field(name="RD", value=str(int(round(rd))), inline=True)
+    embed.add_field(name="Pelit", value=str(int(elo_games)), inline=True)
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="topelo", description="Top 10 Elo-ranking")
+async def topelo_cmd(interaction: discord.Interaction):
+    rows = await bot.db.get_top_ratings(10)
+    if not rows:
+        return await interaction.response.send_message("Ei Elo-dataa vielä.", ephemeral=True)
+
+    lines = []
+    for i, (uid, rating, games, _rd) in enumerate(rows, start=1):
+        name = await get_display_name(interaction, uid)
+        lines.append(f"{i}. {name} — {int(round(rating))} ({games} peliä)")
+
+    embed = discord.Embed(
+        title="Top 10 Elo",
+        description="\n".join(lines),
+        color=EMBED_COLOR_PRIMARY,
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="winners", description="Näytä eniten pelejä voittaneet pelaajat (Top 10)")
 async def winners_cmd(interaction: discord.Interaction):
     """Näyttää Top 10 pelaajat voittojen ja voittoprosentin mukaan (tasatilanteet ratkaistaan WR:llä)."""
@@ -1789,6 +2054,13 @@ async def reset_cmd(interaction: discord.Interaction):
     st.last_pick_prefix = None
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
+
+@bot.tree.command(name="recalcelo", description="Laske Elo-pisteet uudelleen kaikista peleistä (admin)")
+async def recalcelo_cmd(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_guild:
+        return await interaction.response.send_message("Vain ylläpito voi käyttää tätä komentoa.", ephemeral=True)
+    processed = await bot.db.recalc_all_ratings_from_history()
+    await interaction.response.send_message(f"Elo-laskenta valmis. Käsiteltiin {processed} peliä.")
     
 @bot.tree.command(name="filltest", description="Täyttää jonon testipelaajilla (vain kehityskäyttöön).")
 async def filltest_cmd(interaction: discord.Interaction):

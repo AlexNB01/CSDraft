@@ -270,6 +270,42 @@ class DB:
                     )
                 await db.commit()
 
+    async def get_captain_results(self, user_ids: List[int]) -> Dict[int, Tuple[int, int]]:
+        if not user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in user_ids)
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                f"""
+                SELECT captain1 AS user_id,
+                       SUM(CASE WHEN winner = 1 THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN winner IS NOT NULL THEN 1 ELSE 0 END) AS games
+                FROM games
+                WHERE captain1 IN ({placeholders})
+                GROUP BY captain1
+                """,
+                tuple(user_ids),
+            )
+            rows1 = await cur.fetchall()
+            cur = await db.execute(
+                f"""
+                SELECT captain2 AS user_id,
+                       SUM(CASE WHEN winner = 2 THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN winner IS NOT NULL THEN 1 ELSE 0 END) AS games
+                FROM games
+                WHERE captain2 IN ({placeholders})
+                GROUP BY captain2
+                """,
+                tuple(user_ids),
+            )
+            rows2 = await cur.fetchall()
+        results: Dict[int, Tuple[int, int]] = {}
+        for uid, wins, games in rows1 + rows2:
+            uid_int = int(uid)
+            prev_wins, prev_games = results.get(uid_int, (0, 0))
+            results[uid_int] = (prev_wins + int(wins or 0), prev_games + int(games or 0))
+        return results
+
     async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
@@ -2183,16 +2219,18 @@ async def winners_cmd(interaction: discord.Interaction):
 async def captains_cmd(interaction: discord.Interaction):
     async with aiosqlite.connect(bot.db.path) as db:
         cur = await db.execute(
-            "SELECT user_id, captain_count, captain_wins FROM players ORDER BY captain_count DESC, captain_wins DESC, user_id ASC LIMIT 10"
+            "SELECT user_id, captain_count FROM players ORDER BY captain_count DESC, user_id ASC LIMIT 10"
         )
         rows = await cur.fetchall()
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
+    results_map = await bot.db.get_captain_results([uid for uid, _count in rows])
     lines = []
-    for i, (uid, count, captain_wins) in enumerate(rows, start=1):
+    for i, (uid, count) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        winrate = (captain_wins / count * 100.0) if count else 0.0
+        wins, games = results_map.get(int(uid), (0, 0))
+        winrate = (wins / games * 100.0) if games else 0.0
         lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))

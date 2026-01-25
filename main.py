@@ -1843,12 +1843,27 @@ async def start_draft(interaction: discord.Interaction):
     ]
     eligible_without_games = [uid for uid in real_pool if uid not in opt_outs]
     if len(eligible) >= 2:
-        c1, c2 = eligible[0], eligible[1]
+        captain_pool = eligible
     elif len(eligible_without_games) >= 2:
-        c1, c2 = eligible_without_games[0], eligible_without_games[1]
+        captain_pool = eligible_without_games
     else:
         await interaction.followup.send("Liian vähän pelaajia kapteenivalintaan.")
         return
+
+    c1 = random.choice(captain_pool)
+    remaining = [uid for uid in captain_pool if uid != c1]
+    rating_rows = await bot.db.get_rating_rows(captain_pool)
+    c1_rating = rating_rows.get(c1, (INITIAL_RATING, 0))[0]
+    closest_diff = min(
+        abs(rating_rows.get(uid, (INITIAL_RATING, 0))[0] - c1_rating)
+        for uid in remaining
+    )
+    closest_candidates = [
+        uid
+        for uid in remaining
+        if abs(rating_rows.get(uid, (INITIAL_RATING, 0))[0] - c1_rating) == closest_diff
+    ]
+    c2 = random.choice(closest_candidates)
 
     st.captains = (c1, c2)
     st.team1 = [c1]

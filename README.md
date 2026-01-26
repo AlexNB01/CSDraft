@@ -84,6 +84,7 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 |---------|-------------|
 | `/setwinner <game_id> <1\|2\|0>` | Set winning team for a game (0 = draw) |
 | `/setdraw <game_id>` | Mark game as a draw |
+| `/cancelmatch <game_id>` | Delete a game and rollback stats/ratings (admin only) |
 | `/reset` | Clear queue and draft state (requires Manage Server) |
 | `/recalcelo` | Recalculate Elo from all recorded games |
 | `/filltest` | Fill queue with test players (dev only) |

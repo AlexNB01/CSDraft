@@ -121,6 +121,8 @@ class DraftState:
     rc_deadline_ts: Optional[float] = None
     pick_timer_seq: int = 0    
     game_id: Optional[int] = None
+    first_pick_user_id: Optional[int] = None
+    last_pick_user_id: Optional[int] = None
 
 
 # -----------------------------
@@ -145,6 +147,8 @@ CREATE TABLE IF NOT EXISTS games (
   team2 TEXT NOT NULL,  -- JSON array of user_ids
   captain1 INTEGER,
   captain2 INTEGER,
+  first_pick_user_id INTEGER,
+  last_pick_user_id INTEGER,
   winner INTEGER,       -- 1 or 2, NULL if unset
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -238,6 +242,14 @@ class DB:
                 pass
             try:
                 await db.execute("ALTER TABLE games ADD COLUMN captain2 INTEGER")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE games ADD COLUMN first_pick_user_id INTEGER")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE games ADD COLUMN last_pick_user_id INTEGER")
             except aiosqlite.OperationalError:
                 pass
             await db.commit()
@@ -553,6 +565,8 @@ class DB:
         team2: List[int],
         captain1: Optional[int] = None,
         captain2: Optional[int] = None,
+        first_pick_user_id: Optional[int] = None,
+        last_pick_user_id: Optional[int] = None,
     ) -> int:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
@@ -563,8 +577,20 @@ class DB:
                         (uid,),
                     )
                 cur = await db.execute(
-                    "INSERT INTO games (guild_id, team1, team2, captain1, captain2) VALUES (?,?,?,?,?)",
-                    (guild_id, json.dumps(team1), json.dumps(team2), captain1, captain2),
+                    """
+                    INSERT INTO games
+                      (guild_id, team1, team2, captain1, captain2, first_pick_user_id, last_pick_user_id)
+                    VALUES (?,?,?,?,?,?,?)
+                    """,
+                    (
+                        guild_id,
+                        json.dumps(team1),
+                        json.dumps(team2),
+                        captain1,
+                        captain2,
+                        first_pick_user_id,
+                        last_pick_user_id,
+                    ),
                 )
                 await db.commit()
                 return cur.lastrowid
@@ -683,7 +709,11 @@ class DB:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 cur = await db.execute(
-                    "SELECT team1, team2, winner, captain1, captain2 FROM games WHERE id=?",
+                    """
+                    SELECT team1, team2, winner, captain1, captain2, first_pick_user_id, last_pick_user_id
+                    FROM games
+                    WHERE id=?
+                    """,
                     (game_id,),
                 )
                 row = await cur.fetchone()
@@ -695,6 +725,8 @@ class DB:
                 winner = row[2]
                 captain1 = row[3]
                 captain2 = row[4]
+                first_pick_user_id = row[5]
+                last_pick_user_id = row[6]
 
                 for uid in team1 + team2:
                     await db.execute(
@@ -715,6 +747,24 @@ class DB:
                             "UPDATE players SET captain_wins = CASE WHEN captain_wins > 0 THEN captain_wins - 1 ELSE 0 END WHERE user_id = ?",
                             (winning_captain,),
                         )
+
+                for captain_id in (captain1, captain2):
+                    if captain_id is not None:
+                        await db.execute(
+                            "UPDATE players SET captain_count = CASE WHEN captain_count > 0 THEN captain_count - 1 ELSE 0 END WHERE user_id = ?",
+                            (captain_id,),
+                        )
+
+                if first_pick_user_id is not None:
+                    await db.execute(
+                        "UPDATE players SET first_pick_count = CASE WHEN first_pick_count > 0 THEN first_pick_count - 1 ELSE 0 END WHERE user_id = ?",
+                        (first_pick_user_id,),
+                    )
+                if last_pick_user_id is not None:
+                    await db.execute(
+                        "UPDATE players SET last_pick_count = CASE WHEN last_pick_count > 0 THEN last_pick_count - 1 ELSE 0 END WHERE user_id = ?",
+                        (last_pick_user_id,),
+                    )
 
                 await self._rollback_ratings_for_game_tx(db, game_id)
                 await db.execute("DELETE FROM games WHERE id = ?", (game_id,))
@@ -1252,6 +1302,7 @@ async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int
         st.pick_pool.remove(uid)
 
     if st.pick_index == 0:
+        st.first_pick_user_id = uid
         await bot.db.bump_first_last(uid, first=True)
 
     st.pick_index += 1
@@ -1284,6 +1335,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
         if len(st.pick_pool) == 1:
             last_uid = st.pick_pool.pop()
             st.team1.append(last_uid)
+            st.last_pick_user_id = last_uid
             await bot.db.bump_first_last(last_uid, last=True)
 
         if st.pick_msg:
@@ -1295,7 +1347,15 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
 
         captain1 = st.captains[0] if st.captains else None
         captain2 = st.captains[1] if st.captains else None
-        game_id = await bot.db.record_game(interaction.guild_id, st.team1, st.team2, captain1, captain2)
+        game_id = await bot.db.record_game(
+            interaction.guild_id,
+            st.team1,
+            st.team2,
+            captain1,
+            captain2,
+            st.first_pick_user_id,
+            st.last_pick_user_id,
+        )
         st.game_id = game_id
 
         await backup_db()

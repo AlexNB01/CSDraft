@@ -1895,19 +1895,18 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
 
             rating_history = await bot.db.get_rating_history_for_game(game_id)
             if rating_history:
-                async def build_team_changes(team_ids: List[int]) -> Tuple[str, int]:
+                async def build_team_changes(team_ids: List[int]) -> Tuple[str, float]:
                     parts = []
-                    team_delta = None
+                    team_delta: Optional[float] = None
                     for uid in team_ids:
                         if uid not in rating_history:
                             continue
                         name = await get_display_name(interaction, uid)
                         _pre, post, delta = rating_history[uid]
-                        delta_int = int(round(delta))
                         if team_delta is None:
-                            team_delta = delta_int
+                            team_delta = round(delta, 1)
                         parts.append(f"{name} ({int(round(post))})")
-                    return (", ".join(parts) if parts else "—", team_delta or 0)
+                    return (", ".join(parts) if parts else "—", team_delta or 0.0)
 
                 team1_changes, team1_delta = await build_team_changes(team1)
                 team2_changes, team2_delta = await build_team_changes(team2)
@@ -1915,8 +1914,8 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
                 team2_sign = "+" if team2_delta >= 0 else ""
                 msg_text += (
                     "\nElo-muutokset:"
-                    f"\nTeam 1 ({team1_sign}{team1_delta}): {team1_changes}"
-                    f"\nTeam 2 ({team2_sign}{team2_delta}): {team2_changes}"
+                    f"\nTeam 1 ({team1_sign}{team1_delta:.1f}): {team1_changes}"
+                    f"\nTeam 2 ({team2_sign}{team2_delta:.1f}): {team2_changes}"
                 )
         else:
             return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)

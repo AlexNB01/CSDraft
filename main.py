@@ -679,6 +679,48 @@ class DB:
                 await db.commit()
                 return team1, team2
 
+    async def cancel_match(self, game_id: int) -> Tuple[List[int], List[int]]:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                cur = await db.execute(
+                    "SELECT team1, team2, winner, captain1, captain2 FROM games WHERE id=?",
+                    (game_id,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    raise ValueError("Peliä ei löytynyt tällä ID:llä.")
+
+                team1 = json.loads(row[0])
+                team2 = json.loads(row[1])
+                winner = row[2]
+                captain1 = row[3]
+                captain2 = row[4]
+
+                for uid in team1 + team2:
+                    await db.execute(
+                        "UPDATE players SET games_played = CASE WHEN games_played > 0 THEN games_played - 1 ELSE 0 END WHERE user_id = ?",
+                        (uid,),
+                    )
+
+                if winner in (1, 2):
+                    winners = team1 if winner == 1 else team2
+                    for uid in winners:
+                        await db.execute(
+                            "UPDATE players SET wins = CASE WHEN wins > 0 THEN wins - 1 ELSE 0 END WHERE user_id = ?",
+                            (uid,),
+                        )
+                    winning_captain = captain1 if winner == 1 else captain2
+                    if winning_captain is not None:
+                        await db.execute(
+                            "UPDATE players SET captain_wins = CASE WHEN captain_wins > 0 THEN captain_wins - 1 ELSE 0 END WHERE user_id = ?",
+                            (winning_captain,),
+                        )
+
+                await self._rollback_ratings_for_game_tx(db, game_id)
+                await db.execute("DELETE FROM games WHERE id = ?", (game_id,))
+                await db.commit()
+                return team1, team2
+
 
     async def get_player(self, user_id: int) -> Optional[dict]:
         async with aiosqlite.connect(self.path) as db:
@@ -1991,6 +2033,26 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
 
 @setwinner_cmd.autocomplete("game_id")
 async def setwinner_game_id_autocomplete(interaction: discord.Interaction, current: str):
+    ids = await bot.db.get_recent_game_ids(10)
+    if current:
+        ids = [gid for gid in ids if str(gid).startswith(current)]
+    return [app_commands.Choice(name=f"Peli {gid}", value=gid) for gid in ids]
+
+@bot.tree.command(name="cancelmatch", description="Poista ottelu tietokannasta (vain admin)")
+@app_commands.describe(game_id="Pelin ID")
+async def cancelmatch_cmd(interaction: discord.Interaction, game_id: int):
+    if interaction.user.id != 97687348396953600:
+        return await interaction.response.send_message("Ei oikeuksia tähän komentoon.", ephemeral=True)
+
+    try:
+        await bot.db.cancel_match(game_id)
+        await interaction.response.send_message(f"Peli `{game_id}` poistettu tietokannasta.")
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+
+
+@cancelmatch_cmd.autocomplete("game_id")
+async def cancelmatch_game_id_autocomplete(interaction: discord.Interaction, current: str):
     ids = await bot.db.get_recent_game_ids(10)
     if current:
         ids = [gid for gid in ids if str(gid).startswith(current)]

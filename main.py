@@ -5,6 +5,7 @@ import json
 import shutil
 import datetime
 import typing
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from dotenv import load_dotenv; load_dotenv()
@@ -30,6 +31,10 @@ VOICE_LOBBY_CHANNEL_ID = 364497233061871628
 EMBED_COLOR_PRIMARY = 0x29377e
 EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 
+PICK_ORDER = [
+    "team1", "team2", "team1", "team2", "team1", "team2", "team2"
+]
+
 # ---- Elo settings ----
 INITIAL_RATING = 1000.0
 BASE_MATCH_DELTA = 25.0
@@ -44,7 +49,8 @@ def build_stats_embed(
     r_games: int, r_wins: int, r_captain: int, r_first: int, r_last: int,
     total_players: int,
     elo_rating: float,
-    r_elo: int
+    r_elo: int,
+    avg_pick_round: Optional[float],
 ) -> discord.Embed:
     emb = discord.Embed(
         title=f"Pelaajatilastot",
@@ -88,6 +94,12 @@ def build_stats_embed(
               f"({r_last}/{total_players})",
         inline=False
     )
+    avg_text = f"{avg_pick_round:.2f}" if avg_pick_round is not None else "—"
+    emb.add_field(
+        name="Valinnan keskiarvo",
+        value=f"**{display_name}** on valittu keskimäärin vuorolla **{avg_text}**",
+        inline=False,
+    )
 
     emb.set_footer(text="CSDraft by Alex")
     return emb
@@ -107,9 +119,7 @@ class DraftState:
     team2: List[int] = field(default_factory=list)
     number_by_uid: Dict[int, int] = field(default_factory=dict)
     pick_pool: List[int] = field(default_factory=list)
-    pick_order: List[str] = field(default_factory=lambda: [
-        "team1", "team2", "team1", "team2", "team1", "team2", "team2"
-    ])
+    pick_order: List[str] = field(default_factory=lambda: PICK_ORDER.copy())
     pick_index: int = 0
     pick_msg: Optional[discord.Message] = None
     pick_timer_task: Optional[asyncio.Task] = None
@@ -876,6 +886,56 @@ class DB:
                 entry["wins"] += 1
         return stats
 
+    async def get_pick_turns_for_user(
+        self,
+        user_id: int,
+        pick_order: List[str],
+    ) -> List[int]:
+        turns: List[int] = []
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT team1, team2 FROM games"
+            )
+            rows = await cur.fetchall()
+
+        for team1_raw, team2_raw in rows:
+            team1 = json.loads(team1_raw)
+            team2 = json.loads(team2_raw)
+            if not team1 and not team2:
+                continue
+
+            captain1 = team1[0] if team1 else None
+            captain2 = team2[0] if team2 else None
+            if user_id in {captain1, captain2}:
+                continue
+            if user_id not in team1 and user_id not in team2:
+                continue
+
+            team1_picks = team1[1:] if len(team1) > 1 else []
+            team2_picks = team2[1:] if len(team2) > 1 else []
+            idx1 = idx2 = 0
+
+            for pick_index, team in enumerate(pick_order, start=1):
+                if team == "team1":
+                    if idx1 >= len(team1_picks):
+                        continue
+                    picked_uid = team1_picks[idx1]
+                    idx1 += 1
+                else:
+                    if idx2 >= len(team2_picks):
+                        continue
+                    picked_uid = team2_picks[idx2]
+                    idx2 += 1
+                if picked_uid == user_id:
+                    turns.append(pick_index)
+
+            leftover = team1_picks[idx1:] + team2_picks[idx2:]
+            for offset, picked_uid in enumerate(leftover, start=1):
+                if picked_uid == user_id:
+                    turns.append(len(pick_order) + offset)
+
+        return turns
+
 # -----------------------------
 # Bot :3
 # -----------------------------
@@ -932,6 +992,11 @@ def average(values: List[float]) -> float:
     if not values:
         raise ValueError("Average requires at least one value.")
     return sum(values) / len(values)
+
+def average_pick_round(turns: List[int]) -> Optional[float]:
+    if not turns:
+        return None
+    return sum(turns) / len(turns)
 
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
@@ -2015,6 +2080,8 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
     rating_row = await bot.db.get_rating_rows([target.id])
     elo_rating = rating_row.get(target.id, (INITIAL_RATING, 0))[0]
     r_elo = await bot.db.get_elo_rank(target.id)
+    pick_turns = await bot.db.get_pick_turns_for_user(target.id, PICK_ORDER)
+    avg_pick_round = average_pick_round(pick_turns)
 
     bot_name = bot.user.name if bot.user else "GatherBot"
     emb = build_stats_embed(
@@ -2027,9 +2094,38 @@ async def pstats_cmd(interaction: discord.Interaction, user: Optional[discord.Us
         r_games=r_games, r_wins=r_wins, r_captain=r_captain, r_first=r_first, r_last=r_last,
         total_players=total_players,
         elo_rating=elo_rating,
-        r_elo=r_elo
+        r_elo=r_elo,
+        avg_pick_round=avg_pick_round,
     )
     await interaction.response.send_message(embed=emb)
+
+@bot.tree.command(name="pickstats", description="Näytä millä vuoroilla pelaaja on valittu")
+@app_commands.describe(user="Valinnainen: käyttäjä, jonka pickstats katsotaan")
+async def pickstats_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
+    target = user or interaction.user
+    pick_turns = await bot.db.get_pick_turns_for_user(target.id, PICK_ORDER)
+    avg_pick_round = average_pick_round(pick_turns)
+    counts = Counter(pick_turns)
+    lines = [f"Vuoro {turn}: {counts[turn]}x" for turn in sorted(counts)]
+    avg_text = f"{avg_pick_round:.2f}" if avg_pick_round is not None else "—"
+    name = await get_display_name(interaction, target.id)
+
+    embed = discord.Embed(
+        title=f"Pickstats: {name}",
+        color=EMBED_COLOR_PRIMARY,
+    )
+    embed.add_field(
+        name="Valinnat vuoroittain",
+        value="\n".join(lines) if lines else "Ei valintoja vielä.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Valinnan keskiarvo",
+        value=f"Vuoro **{avg_text}**",
+        inline=False,
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="winrate", description="Näytä winrate toista pelaajaa vastaan")
 @app_commands.describe(opponent="Pelaaja, jota vastaan", user="Valinnainen: käyttäjä jonka winratea katsotaan")
@@ -2466,6 +2562,11 @@ async def dstatus_bang(ctx: commands.Context):
 async def pstats_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
     interaction = InteractionShim(ctx)
     await pstats_cmd.callback(interaction, user or ctx.author)
+
+@bot.command(name="pickstats")
+async def pickstats_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
+    interaction = InteractionShim(ctx)
+    await pickstats_cmd.callback(interaction, user or ctx.author)
 
 @bot.command(name="winrate", aliases=["wr"])
 async def winrate_bang(ctx: commands.Context, *, opponent: Optional[str] = None):

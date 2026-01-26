@@ -841,6 +841,41 @@ class DB:
                     draws_by_user[uid] += 1
         return draws_by_user
 
+    async def get_pick_winrates(
+        self,
+        user_ids: List[int],
+        pick_index: int,
+    ) -> Dict[int, Dict[str, int]]:
+        if not user_ids:
+            return {}
+        target_ids = set(user_ids)
+        stats = {uid: {"games": 0, "wins": 0, "draws": 0} for uid in target_ids}
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT team1, winner FROM games WHERE winner IS NOT NULL"
+            )
+            rows = await cur.fetchall()
+
+        for team1_raw, winner in rows:
+            team1 = json.loads(team1_raw)
+            if not team1:
+                continue
+            if pick_index >= 0 and len(team1) <= pick_index:
+                continue
+            try:
+                picked_uid = team1[pick_index]
+            except IndexError:
+                continue
+            if picked_uid not in target_ids:
+                continue
+            entry = stats[picked_uid]
+            entry["games"] += 1
+            if winner == 0:
+                entry["draws"] += 1
+            elif winner == 1:
+                entry["wins"] += 1
+        return stats
+
 # -----------------------------
 # Bot :3
 # -----------------------------
@@ -2283,10 +2318,17 @@ async def thinkids_cmd(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
+    winrate_map = await bot.db.get_pick_winrates(
+        [uid for uid, _, _, _ in rows],
+        pick_index=1,
+    )
     lines = []
     for i, (uid, count, _, _) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        lines.append(f"{i}. {name} / {count}")
+        stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
+        games = stats["games"]
+        wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
 
     emb = discord.Embed(title="Eniten valittu ensimmäisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -2298,10 +2340,17 @@ async def fatkids_cmd(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
+    winrate_map = await bot.db.get_pick_winrates(
+        [uid for uid, _, _, _ in rows],
+        pick_index=-1,
+    )
     lines = []
     for i, (uid, count, _, _) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        lines.append(f"{i}. {name} / {count}")
+        stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
+        games = stats["games"]
+        wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
 
     emb = discord.Embed(title="Eniten valittu viimeisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)

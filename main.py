@@ -2304,16 +2304,17 @@ async def winners_cmd(interaction: discord.Interaction):
 async def captains_cmd(interaction: discord.Interaction):
     async with aiosqlite.connect(bot.db.path) as db:
         cur = await db.execute(
-            "SELECT user_id, captain_count FROM players ORDER BY captain_count DESC, user_id ASC LIMIT 10"
+            "SELECT user_id, captain_count, captain_wins FROM players ORDER BY captain_count DESC, user_id ASC LIMIT 10"
         )
         rows = await cur.fetchall()
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
     lines = []
-    for i, (uid, count) in enumerate(rows, start=1):
+    for i, (uid, count, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        lines.append(f"{i}. {name} / {count}")
+        winrate = (wins / count * 100.0) if count > 0 else 0.0
+        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)

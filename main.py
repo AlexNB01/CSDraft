@@ -143,8 +143,6 @@ CREATE TABLE IF NOT EXISTS games (
   guild_id INTEGER NOT NULL,
   team1 TEXT NOT NULL,  -- JSON array of user_ids
   team2 TEXT NOT NULL,  -- JSON array of user_ids
-  captain1 INTEGER,
-  captain2 INTEGER,
   winner INTEGER,       -- 1 or 2, NULL if unset
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -232,14 +230,6 @@ class DB:
                 await db.execute("ALTER TABLE players ADD COLUMN captain_wins INTEGER NOT NULL DEFAULT 0")
             except aiosqlite.OperationalError:
                 pass
-            try:
-                await db.execute("ALTER TABLE games ADD COLUMN captain1 INTEGER")
-            except aiosqlite.OperationalError:
-                pass
-            try:
-                await db.execute("ALTER TABLE games ADD COLUMN captain2 INTEGER")
-            except aiosqlite.OperationalError:
-                pass
             await db.commit()
 
     async def ensure_player(self, user_id: int):
@@ -319,42 +309,6 @@ class DB:
                         (user_id,),
                     )
                 await db.commit()
-
-    async def get_captain_results(self, user_ids: List[int]) -> Dict[int, Tuple[int, int]]:
-        if not user_ids:
-            return {}
-        placeholders = ",".join("?" for _ in user_ids)
-        async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute(
-                f"""
-                SELECT captain1 AS user_id,
-                       SUM(CASE WHEN winner = 1 THEN 1 ELSE 0 END) AS wins,
-                       SUM(CASE WHEN winner IS NOT NULL THEN 1 ELSE 0 END) AS games
-                FROM games
-                WHERE captain1 IN ({placeholders})
-                GROUP BY captain1
-                """,
-                tuple(user_ids),
-            )
-            rows1 = await cur.fetchall()
-            cur = await db.execute(
-                f"""
-                SELECT captain2 AS user_id,
-                       SUM(CASE WHEN winner = 2 THEN 1 ELSE 0 END) AS wins,
-                       SUM(CASE WHEN winner IS NOT NULL THEN 1 ELSE 0 END) AS games
-                FROM games
-                WHERE captain2 IN ({placeholders})
-                GROUP BY captain2
-                """,
-                tuple(user_ids),
-            )
-            rows2 = await cur.fetchall()
-        results: Dict[int, Tuple[int, int]] = {}
-        for uid, wins, games in rows1 + rows2:
-            uid_int = int(uid)
-            prev_wins, prev_games = results.get(uid_int, (0, 0))
-            results[uid_int] = (prev_wins + int(wins or 0), prev_games + int(games or 0))
-        return results
 
     async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
         async with aiosqlite.connect(self.path) as db:
@@ -554,6 +508,10 @@ class DB:
         captain1: Optional[int] = None,
         captain2: Optional[int] = None,
     ) -> int:
+        if captain1 in team1:
+            team1 = [captain1] + [uid for uid in team1 if uid != captain1]
+        if captain2 in team2:
+            team2 = [captain2] + [uid for uid in team2 if uid != captain2]
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 for uid in team1 + team2:
@@ -563,8 +521,8 @@ class DB:
                         (uid,),
                     )
                 cur = await db.execute(
-                    "INSERT INTO games (guild_id, team1, team2, captain1, captain2) VALUES (?,?,?,?,?)",
-                    (guild_id, json.dumps(team1), json.dumps(team2), captain1, captain2),
+                    "INSERT INTO games (guild_id, team1, team2) VALUES (?,?,?)",
+                    (guild_id, json.dumps(team1), json.dumps(team2)),
                 )
                 await db.commit()
                 return cur.lastrowid
@@ -575,7 +533,7 @@ class DB:
 
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
-                cur = await db.execute("SELECT team1, team2, winner, captain1, captain2 FROM games WHERE id=?", (game_id,))
+                cur = await db.execute("SELECT team1, team2, winner FROM games WHERE id=?", (game_id,))
                 row = await cur.fetchone()
                 if not row:
                     raise ValueError("Peliä ei löytynyt tällä ID:llä.")
@@ -583,8 +541,8 @@ class DB:
                 team1 = json.loads(row[0])
                 team2 = json.loads(row[1])
                 previous_winner = row[2]
-                captain1 = row[3]
-                captain2 = row[4]
+                captain1 = team1[0] if team1 else None
+                captain2 = team2[0] if team2 else None
 
                 if previous_winner is None:
                     await db.execute("UPDATE games SET winner=? WHERE id=?", (winner_team, game_id))
@@ -640,7 +598,7 @@ class DB:
     async def set_draw(self, game_id: int, overwrite: bool = False) -> Tuple[List[int], List[int]]:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
-                cur = await db.execute("SELECT team1, team2, winner, captain1, captain2 FROM games WHERE id=?", (game_id,))
+                cur = await db.execute("SELECT team1, team2, winner FROM games WHERE id=?", (game_id,))
                 row = await cur.fetchone()
                 if not row:
                     raise ValueError("Peliä ei löytynyt tällä ID:llä.")
@@ -648,8 +606,8 @@ class DB:
                 team1 = json.loads(row[0])
                 team2 = json.loads(row[1])
                 previous_winner = row[2]
-                captain1 = row[3]
-                captain2 = row[4]
+                captain1 = team1[0] if team1 else None
+                captain2 = team2[0] if team2 else None
 
                 if previous_winner is None:
                     await db.execute("UPDATE games SET winner=0 WHERE id=?", (game_id,))
@@ -2304,16 +2262,17 @@ async def winners_cmd(interaction: discord.Interaction):
 async def captains_cmd(interaction: discord.Interaction):
     async with aiosqlite.connect(bot.db.path) as db:
         cur = await db.execute(
-            "SELECT user_id, captain_count FROM players ORDER BY captain_count DESC, user_id ASC LIMIT 10"
+            "SELECT user_id, captain_count, captain_wins FROM players ORDER BY captain_count DESC, user_id ASC LIMIT 10"
         )
         rows = await cur.fetchall()
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
     lines = []
-    for i, (uid, count) in enumerate(rows, start=1):
+    for i, (uid, count, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
-        lines.append(f"{i}. {name} / {count}")
+        winrate = (wins / count * 100.0) if count > 0 else 0.0
+        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)

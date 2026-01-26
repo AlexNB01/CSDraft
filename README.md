@@ -122,7 +122,7 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 
 ## Database Schema
 
-The bot uses SQLite with two main tables:
+The bot uses SQLite with the following tables:
 
 ### players
 
@@ -140,8 +140,6 @@ The bot uses SQLite with two main tables:
 - `guild_id` - Discord server ID
 - `team1` - JSON array of Team 1 user IDs
 - `team2` - JSON array of Team 2 user IDs
-- `captain1` - Team 1 captain user ID
-- `captain2` - Team 2 captain user ID
 - `winner` - 1, 2, 0 (draw), or NULL (unset)
 - `created_at` - Timestamp
 
@@ -166,6 +164,16 @@ The bot uses SQLite with two main tables:
 
 Database file: `draftbot.sqlite3`
 Backups: `backups/` directory (last 10 kept)
+
+## Elo system
+
+Elo ratings are calculated per match using the team average ratings, then applied to every player on the team:
+
+- **Initial rating:** 1000
+- **Expected score:** `1 / (1 + 10^((team_b_avg - team_a_avg) / 400))`
+- **Delta:** `BASE_MATCH_DELTA * (score - expected)` where score is 1.0 for a win, 0.0 for a loss, and 0.5 for a draw
+- **Caps:** win/loss deltas are clamped to ±30; draw deltas are clamped to ±5
+- **Tracking:** every rating change is saved to `rating_history` with pre/post ratings and the delta
 
 ### Testing Mode
 

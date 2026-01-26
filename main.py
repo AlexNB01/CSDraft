@@ -2106,7 +2106,7 @@ async def pickstats_cmd(interaction: discord.Interaction, user: Optional[discord
     pick_turns = await bot.db.get_pick_turns_for_user(target.id, PICK_ORDER)
     avg_pick_round = average_pick_round(pick_turns)
     counts = Counter(pick_turns)
-    lines = [f"Vuoro {turn}: {counts[turn]}x" for turn in sorted(counts)]
+    lines = [f"Vuoro {turn}: {counts[turn]}" for turn in sorted(counts)]
     avg_text = f"{avg_pick_round:.2f}" if avg_pick_round is not None else "—"
     name = await get_display_name(interaction, target.id)
 

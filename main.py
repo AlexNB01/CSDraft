@@ -2298,12 +2298,12 @@ async def top10_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
     draw_map = await bot.db.get_draws_for_users([uid for uid, _, _, _ in rows])
-    lines = []
+    lines = ["**Sija | Pelaaja | Pelit**"]
     for i, (uid, _, gp, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         draws = draw_map.get(uid, 0)
         wr = ((wins + draws * 0.5) / gp * 100.0) if gp > 0 else 0.0
-        lines.append(f"{i}. {name} / {gp}")
+        lines.append(f"{i} | {name} | {gp}")
 
     emb = discord.Embed(title="Eniten pelejä pelanneet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -2339,10 +2339,10 @@ async def topelo_cmd(interaction: discord.Interaction):
             ephemeral=True,
         )
 
-    lines = []
+    lines = ["**Sija | Pelaaja | Elo | Pelit**"]
     for i, (uid, rating, games) in enumerate(rows[:10], start=1):
         name = await get_display_name(interaction, uid)
-        lines.append(f"{i}. {name} — {int(round(rating))} ({games} peliä)")
+        lines.append(f"{i} | {name} | {int(round(rating))} | {games}")
 
     embed = discord.Embed(
         title="Top 10 Elo",
@@ -2374,10 +2374,11 @@ async def winners_cmd(interaction: discord.Interaction):
     rows.sort(key=lambda r: (-r[1], -r[3], r[0].lower()))
 
     top = rows[:10]
-    lines = [
-        f"{i}. {name} / {wins} ({wr:.1f}%)"
+    lines = ["**Sija | Pelaaja | Voitot | WR**"]
+    lines.extend(
+        f"{i} | {name} | {wins} | {wr:.1f}%"
         for i, (name, wins, games, wr) in enumerate(top, start=1)
-    ]
+    )
 
     embed = discord.Embed(
         title="Eniten pelejä voittaneet (Top 10)",
@@ -2398,11 +2399,11 @@ async def captains_cmd(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message("Ei dataa vielä.", ephemeral=True)
 
-    lines = []
+    lines = ["**Sija | Pelaaja | Kapteenina | WR**"]
     for i, (uid, count, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         winrate = (wins / count * 100.0) if count > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
+        lines.append(f"{i} | {name} | {count} | {winrate:.1f}%")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -2418,13 +2419,13 @@ async def thinkids_cmd(interaction: discord.Interaction):
         [uid for uid, _, _, _ in rows],
         pick_index=1,
     )
-    lines = []
+    lines = ["**Sija | Pelaaja | Ensivalinnat | WR**"]
     for i, (uid, count, _, _) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
+        lines.append(f"{i} | {name} | {count} | {wr:.1f}%")
 
     emb = discord.Embed(title="Eniten valittu ensimmäisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -2440,13 +2441,13 @@ async def fatkids_cmd(interaction: discord.Interaction):
         [uid for uid, _, _, _ in rows],
         pick_index=-1,
     )
-    lines = []
+    lines = ["**Sija | Pelaaja | Viimeisenä | WR**"]
     for i, (uid, count, _, _) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
+        lines.append(f"{i} | {name} | {count} | {wr:.1f}%")
 
     emb = discord.Embed(title="Eniten valittu viimeisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)

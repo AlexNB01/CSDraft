@@ -4,6 +4,8 @@ import random
 import json
 import shutil
 import datetime
+import socket
+import struct
 import typing
 from collections import Counter
 from dataclasses import dataclass, field
@@ -22,10 +24,17 @@ QUEUE_SIZE = 10
 READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
+MAP_VETO_TIMEOUT_SECONDS = 45
 AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
 TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
 VOICE_LOBBY_CHANNEL_ID = 364497233061871628
+CS2_RCON_HOST = os.getenv("CS2_RCON_HOST", "127.0.0.1")
+CS2_RCON_PORT = int(os.getenv("CS2_RCON_PORT", "27015"))
+CS2_RCON_PASSWORD = os.getenv("CS2_RCON_PASSWORD", "")
+CS2_MATCH_CONFIG_DIR = os.getenv("CS2_MATCH_CONFIG_DIR", "./match_configs")
+CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "css_matchzy_start")
+CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -33,6 +42,15 @@ EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 
 PICK_ORDER = [
     "team1", "team2", "team1", "team2", "team1", "team2", "team2"
+]
+MAP_POOL = [
+    "de_ancient",
+    "de_anubis",
+    "de_inferno",
+    "de_mirage",
+    "de_nuke",
+    "de_overpass",
+    "de_vertigo",
 ]
 
 # ---- Elo settings ----
@@ -131,6 +149,17 @@ class DraftState:
     rc_deadline_ts: Optional[float] = None
     pick_timer_seq: int = 0    
     game_id: Optional[int] = None
+    map_veto_active: bool = False
+    map_pool: List[str] = field(default_factory=list)
+    banned_maps: List[str] = field(default_factory=list)
+    veto_order: List[str] = field(default_factory=list)
+    veto_index: int = 0
+    veto_msg: Optional[discord.Message] = None
+    veto_timer_task: Optional[asyncio.Task] = None
+    veto_deadline_ts: Optional[float] = None
+    veto_timer_msg: Optional[discord.Message] = None
+    veto_timer_seq: int = 0
+    selected_map: Optional[str] = None
 
 
 # -----------------------------
@@ -175,6 +204,12 @@ CREATE TABLE IF NOT EXISTS rating_history (
 
 CREATE TABLE IF NOT EXISTS captain_opt_out (
   user_id INTEGER PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS steam_links (
+  discord_user_id INTEGER PRIMARY KEY,
+  steamid64 TEXT NOT NULL UNIQUE,
+  linked_at TEXT NOT NULL
 );
 """
 
@@ -259,6 +294,65 @@ class DB:
                     (user_id, INITIAL_RATING, 0),
                 )
                 await db.commit()
+
+    async def upsert_steam_link(self, discord_user_id: int, steamid64: str) -> None:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    """
+                    INSERT INTO steam_links (discord_user_id, steamid64, linked_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(discord_user_id) DO UPDATE SET
+                        steamid64 = excluded.steamid64,
+                        linked_at = excluded.linked_at
+                    """,
+                    (discord_user_id, steamid64, timestamp),
+                )
+                await db.commit()
+
+    async def delete_steam_link(self, discord_user_id: int) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "DELETE FROM steam_links WHERE discord_user_id = ?",
+                    (discord_user_id,),
+                )
+                await db.commit()
+
+    async def get_steamid(self, discord_user_id: int) -> Optional[str]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT steamid64 FROM steam_links WHERE discord_user_id = ?",
+                (discord_user_id,),
+            )
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def get_steamids(self, discord_user_ids: List[int]) -> Dict[int, str]:
+        if not discord_user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in discord_user_ids)
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                f"SELECT discord_user_id, steamid64 FROM steam_links WHERE discord_user_id IN ({placeholders})",
+                tuple(discord_user_ids),
+            )
+            rows = await cur.fetchall()
+        return {int(uid): str(steamid) for uid, steamid in rows}
+
+    async def is_steamid_taken(self, steamid64: str, except_user_id: Optional[int] = None) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT discord_user_id FROM steam_links WHERE steamid64 = ?",
+                (steamid64,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return False
+        if except_user_id is None:
+            return True
+        return int(row[0]) != except_user_id
 
     async def get_rating_rows(self, user_ids: List[int]) -> Dict[int, Tuple[float, int]]:
         if not user_ids:
@@ -1100,6 +1194,17 @@ def _trim_button_label(label: str, max_len: int = 80) -> str:
         return label
     return f"{label[: max_len - 3]}..."
 
+def is_valid_steamid64(value: str) -> bool:
+    return value.isdigit() and len(value) == 17
+
+def mask_steamid64(value: str) -> str:
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+def remaining_maps(st: DraftState) -> List[str]:
+    return [m for m in st.map_pool if m not in st.banned_maps]
+
 class PickButton(discord.ui.Button):
     def __init__(self, uid: int, label: str, row: int):
         super().__init__(
@@ -1121,12 +1226,37 @@ class PickView(discord.ui.View):
         for idx, (uid, label) in enumerate(button_data):
             self.add_item(PickButton(uid, _trim_button_label(label), row=idx // 5))
 
+class MapVetoButton(discord.ui.Button):
+    def __init__(self, map_name: str, row: int):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label=map_name,
+            row=row,
+            custom_id=f"map_veto_{map_name}",
+        )
+        self.map_name = map_name
+
+    async def callback(self, interaction: discord.Interaction):
+        view = typing.cast("MapVetoView", self.view)
+        await handle_veto_selection(interaction, view.state, self.map_name)
+
+class MapVetoView(discord.ui.View):
+    def __init__(self, state: DraftState, maps: List[str]):
+        super().__init__(timeout=None)
+        self.state = state
+        for idx, map_name in enumerate(maps):
+            self.add_item(MapVetoButton(map_name, row=idx // 5))
+
 async def build_pick_view(interaction: discord.Interaction, st: DraftState) -> discord.ui.View:
     button_data = []
     for uid in st.pick_pool:
         name = await get_pick_display_name(interaction, st, uid)
         button_data.append((uid, name))
     return PickView(st, button_data)
+
+async def build_veto_view(st: DraftState) -> discord.ui.View:
+    maps = remaining_maps(st)
+    return MapVetoView(st, maps)
 
 async def handle_pick_selection(interaction: discord.Interaction, st: DraftState, uid: int) -> None:
     if not st.draft_active:
@@ -1146,6 +1276,27 @@ async def handle_pick_selection(interaction: discord.Interaction, st: DraftState
 
     await interaction.response.defer(thinking=False)
     await _apply_pick(interaction, st, uid, is_autopick=False)
+
+async def handle_veto_selection(interaction: discord.Interaction, st: DraftState, map_name: str) -> None:
+    if not st.map_veto_active:
+        return await interaction.response.send_message("Karttaveto ei ole käynnissä.", ephemeral=True)
+    if st.selected_map:
+        return await interaction.response.send_message("Kartta on jo valittu.", ephemeral=True)
+    if st.veto_index >= len(st.veto_order):
+        return await interaction.response.send_message("Karttaveto on jo valmis.", ephemeral=True)
+
+    team = st.veto_order[st.veto_index]
+    expected_captain = st.captains[0] if team == "team1" else st.captains[1]
+    if interaction.user.id != expected_captain:
+        return await interaction.response.send_message(
+            "Vain vuorossa oleva kapteeni voi bannata kartan.",
+            ephemeral=True,
+        )
+    if map_name not in remaining_maps(st):
+        return await interaction.response.send_message("Kartta on jo bannattu.", ephemeral=True)
+
+    await interaction.response.defer(thinking=False)
+    await _apply_veto(interaction, st, map_name, is_autoban=False)
 
 async def announce_next_picker(interaction: discord.Interaction, st: DraftState, prefix: Optional[str] = None):
     if st.pick_index >= len(st.pick_order):
@@ -1254,6 +1405,70 @@ async def _run_pick_countdown(interaction: discord.Interaction, st: DraftState, 
     except asyncio.CancelledError:
         return
 
+async def start_veto_timer(interaction: discord.Interaction, st: DraftState):
+    st.veto_timer_seq = getattr(st, "veto_timer_seq", 0) + 1
+    my_seq = st.veto_timer_seq
+
+    if st.veto_timer_task and not st.veto_timer_task.done():
+        st.veto_timer_task.cancel()
+    st.veto_timer_task = None
+
+    if st.veto_timer_msg:
+        try:
+            await st.veto_timer_msg.delete()
+        except Exception:
+            pass
+        st.veto_timer_msg = None
+
+    st.veto_deadline_ts = asyncio.get_running_loop().time() + MAP_VETO_TIMEOUT_SECONDS
+    text = f"⏳ **{MAP_VETO_TIMEOUT_SECONDS}s** aikaa bannata kartta…"
+    if interaction.channel:
+        st.veto_timer_msg = await interaction.channel.send(text)
+
+    st.veto_timer_task = asyncio.create_task(_run_veto_countdown(interaction, st, my_seq))
+
+async def _run_veto_countdown(interaction: discord.Interaction, st: DraftState, seq: int):
+    try:
+        loop = asyncio.get_running_loop()
+
+        def remaining() -> int:
+            now = loop.time()
+            return int(max(0, (st.veto_deadline_ts or now) - now))
+
+        recreated_once = False
+
+        while st.map_veto_active and st.veto_index < len(st.veto_order):
+            if getattr(st, "veto_timer_seq", 0) != seq:
+                return
+
+            rem = remaining()
+
+            if st.veto_timer_msg:
+                try:
+                    await st.veto_timer_msg.edit(content=f"⏳ **{rem}s** aikaa bannata kartta…")
+                except Exception:
+                    try:
+                        await st.veto_timer_msg.delete()
+                    except Exception:
+                        pass
+                    st.veto_timer_msg = None
+
+            if st.veto_timer_msg is None and not recreated_once and interaction.channel and rem > 0 and st.veto_timer_seq == seq:
+                st.veto_timer_msg = await interaction.channel.send(f"⏳ **{rem}s** aikaa bannata kartta…")
+                recreated_once = True
+
+            if rem <= 0:
+                break
+            await asyncio.sleep(1)
+
+        if st.map_veto_active and st.veto_index < len(st.veto_order) and remaining_maps(st) and getattr(st, "veto_timer_seq", 0) == seq:
+            map_name = random.choice(remaining_maps(st))
+            await _apply_veto(interaction, st, map_name, is_autoban=True)
+            return
+
+    except asyncio.CancelledError:
+        return
+
 
 
 async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int, is_autopick: bool = False):
@@ -1293,6 +1508,109 @@ async def _apply_pick(interaction: discord.Interaction, st: DraftState, uid: int
         return
 
     await _finish_or_next(interaction, st)
+
+async def _clear_veto_ui(st: DraftState):
+    if st.veto_timer_task and not st.veto_timer_task.done():
+        st.veto_timer_task.cancel()
+    st.veto_timer_task = None
+    if st.veto_timer_msg:
+        try:
+            await st.veto_timer_msg.delete()
+        except Exception:
+            pass
+        st.veto_timer_msg = None
+    if st.veto_msg:
+        try:
+            await st.veto_msg.edit(view=None)
+        except Exception:
+            pass
+        st.veto_msg = None
+
+async def announce_next_veto(interaction: discord.Interaction, st: DraftState, prefix: Optional[str] = None):
+    if not st.map_veto_active or st.veto_index >= len(st.veto_order):
+        return
+
+    team = st.veto_order[st.veto_index]
+    captain = st.captains[0] if team == "team1" else st.captains[1]
+    team_label = "Team 1" if team == "team1" else "Team 2"
+
+    head = prefix or ""
+    if head and not head.endswith("\n"):
+        head += "\n"
+
+    remaining = remaining_maps(st)
+    remaining_text = ", ".join(remaining) if remaining else "—"
+    banned_text = ", ".join(st.banned_maps) if st.banned_maps else "—"
+    content = (
+        f"{head}"
+        f"**Map veto**\n"
+        f"Vuoro: {mention(captain)} ({team_label})\n"
+        f"Jäljellä: {remaining_text}\n"
+        f"Bannatut: {banned_text}\n"
+        f"Klikkaa karttaa banataksesi."
+    )
+    view = await build_veto_view(st)
+
+    if st.veto_msg:
+        try:
+            st.veto_msg = await st.veto_msg.edit(content=content, view=view)
+        except Exception:
+            st.veto_msg = await interaction.followup.send(content, view=view, ephemeral=False)
+    else:
+        st.veto_msg = await interaction.followup.send(content, view=view, ephemeral=False)
+
+    await start_veto_timer(interaction, st)
+
+async def start_map_veto(interaction: discord.Interaction, st: DraftState):
+    await _clear_veto_ui(st)
+    st.map_veto_active = True
+    st.map_pool = MAP_POOL.copy()
+    st.banned_maps = []
+    st.veto_order = ["team1" if i % 2 == 0 else "team2" for i in range(max(0, len(st.map_pool) - 1))]
+    st.veto_index = 0
+    st.selected_map = None
+    await announce_next_veto(interaction, st)
+
+async def _apply_veto(interaction: discord.Interaction, st: DraftState, map_name: str, is_autoban: bool = False):
+    remaining = remaining_maps(st)
+    if map_name not in remaining:
+        return
+
+    st.banned_maps.append(map_name)
+    st.veto_index += 1
+
+    if st.veto_timer_msg:
+        try:
+            await st.veto_timer_msg.delete()
+        except Exception:
+            pass
+        st.veto_timer_msg = None
+
+    if not is_autoban and st.veto_timer_task and not st.veto_timer_task.done():
+        st.veto_timer_task.cancel()
+    st.veto_timer_task = None
+
+    remaining = remaining_maps(st)
+    if len(remaining) <= 1:
+        await _finish_map_veto(interaction, st, remaining[0] if remaining else None)
+        return
+
+    prefix = f"Kartta **{map_name}** bannattu."
+    if is_autoban:
+        prefix = f"Aikaraja! Kartta **{map_name}** bannattu automaattisesti."
+    await announce_next_veto(interaction, st, prefix=prefix)
+
+async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, selected_map: Optional[str]):
+    st.map_veto_active = False
+    st.selected_map = selected_map
+    await _clear_veto_ui(st)
+
+    if not selected_map:
+        await interaction.followup.send("Karttaveto epäonnistui: karttaa ei löytynyt.")
+        return
+
+    await interaction.followup.send(f"**Kartta valittu:** {selected_map}")
+    await start_server_orchestration(interaction, st)
 
 
 async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
@@ -1381,11 +1699,11 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
             if uid in st.queue
         }
         st.draft_active = False
-        st.captains = None
-        st.team1.clear(); st.team2.clear(); st.pick_pool.clear()
+        st.pick_pool.clear()
         st.pick_index = 0
         st.number_by_uid.clear()
         st.last_pick_prefix = None 
+        st.selected_map = None
 
         if st.pick_timer_task and not st.pick_timer_task.done():
             st.pick_timer_task.cancel()
@@ -1397,6 +1715,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
                 pass
         st.timer_msg = None
         st.pick_msg = None
+        await start_map_veto(interaction, st)
         return
 
     if st.pick_timer_task and not st.pick_timer_task.done():
@@ -1608,6 +1927,161 @@ async def backup_db(keep: int = 10):
             os.remove(os.path.join("backups", f))
         except Exception:
             pass
+
+class SourceRCON:
+    def __init__(self, host: str, port: int, password: str, timeout: float = 5.0):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.timeout = timeout
+        self._socket: Optional[socket.socket] = None
+        self._req_id = 0
+
+    def __enter__(self):
+        self._socket = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        self._socket.settimeout(self.timeout)
+        if not self.authenticate():
+            raise ConnectionError("RCON auth epäonnistui.")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._socket:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+        self._socket = None
+
+    def _next_id(self) -> int:
+        self._req_id += 1
+        return self._req_id
+
+    def _send_packet(self, req_id: int, req_type: int, payload: str) -> None:
+        if not self._socket:
+            raise ConnectionError("RCON socket puuttuu.")
+        data = payload.encode("utf-8") + b"\x00\x00"
+        packet = struct.pack("<ii", req_id, req_type) + data
+        size = struct.pack("<i", len(packet))
+        self._socket.sendall(size + packet)
+
+    def _read_packet(self) -> Tuple[int, int, str]:
+        if not self._socket:
+            raise ConnectionError("RCON socket puuttuu.")
+        raw_size = self._socket.recv(4)
+        if len(raw_size) < 4:
+            raise ConnectionError("RCON vastaus katkesi.")
+        (size,) = struct.unpack("<i", raw_size)
+        payload = b""
+        while len(payload) < size:
+            chunk = self._socket.recv(size - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+        if len(payload) < 8:
+            raise ConnectionError("RCON vastaus liian lyhyt.")
+        req_id, req_type = struct.unpack("<ii", payload[:8])
+        body = payload[8:-2].decode("utf-8", errors="ignore")
+        return req_id, req_type, body
+
+    def authenticate(self) -> bool:
+        req_id = self._next_id()
+        self._send_packet(req_id, 3, self.password)
+        try:
+            for _ in range(2):
+                resp_id, _resp_type, _body = self._read_packet()
+                if resp_id == req_id:
+                    return True
+                if resp_id == -1:
+                    return False
+        except Exception:
+            return False
+        return False
+
+    def command(self, cmd: str) -> str:
+        req_id = self._next_id()
+        self._send_packet(req_id, 2, cmd)
+        resp_id, _resp_type, body = self._read_packet()
+        if resp_id == -1:
+            raise ConnectionError("RCON komento epäonnistui.")
+        return body
+
+def _build_match_config(
+    guild_id: int,
+    game_id: int,
+    selected_map: str,
+    team1_ids: List[str],
+    team2_ids: List[str],
+) -> Tuple[str, dict]:
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
+    config = {
+        "map": selected_map,
+        "ruleset": "competitive",
+        "team1_side": "CT",
+        "team2_side": "T",
+        "team1": team1_ids,
+        "team2": team2_ids,
+    }
+    return filename, config
+
+async def start_server_orchestration(interaction: discord.Interaction, st: DraftState):
+    if not st.team1 or not st.team2 or not st.selected_map:
+        await interaction.followup.send("Peliä ei löydy tai karttaa ei ole valittu.")
+        return
+    if not st.game_id:
+        await interaction.followup.send("Pelin ID puuttuu, en voi käynnistää serveriä.")
+        return
+
+    all_players = st.team1 + st.team2
+    steam_map = await bot.db.get_steamids(all_players)
+    missing = [uid for uid in all_players if uid not in steam_map]
+    if missing:
+        missing_mentions = ", ".join(mention(uid) for uid in missing)
+        await interaction.followup.send(
+            f"Näiltä puuttuu SteamID-linkki: {missing_mentions}\n"
+            f"Linkkaa komennolla **!link <steamid64>**."
+        )
+        return
+
+    if not CS2_RCON_PASSWORD:
+        await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
+        return
+
+    os.makedirs(CS2_MATCH_CONFIG_DIR, exist_ok=True)
+    team1_steamids = [steam_map[uid] for uid in st.team1]
+    team2_steamids = [steam_map[uid] for uid in st.team2]
+    config_filename, config_data = _build_match_config(
+        guild_id=interaction.guild_id or 0,
+        game_id=st.game_id,
+        selected_map=st.selected_map,
+        team1_ids=team1_steamids,
+        team2_ids=team2_steamids,
+    )
+    config_path = os.path.join(CS2_MATCH_CONFIG_DIR, config_filename)
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+    except Exception:
+        await interaction.followup.send("Match configin kirjoitus epäonnistui.")
+        return
+
+    try:
+        with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
+            rcon.command(f"changelevel {st.selected_map}")
+            rcon.command(f"{CS2_MATCH_PLUGIN_START_CMD} {config_filename}")
+    except Exception as exc:
+        await interaction.followup.send(f"RCON epäonnistui: {exc}")
+        return
+
+    team1_names = " ".join(mention(uid) for uid in st.team1)
+    team2_names = " ".join(mention(uid) for uid in st.team2)
+    connect_line = f"\nYhdistä: `{CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
+    await interaction.followup.send(
+        f"Serveri käynnistetään kartalla **{st.selected_map}**.\n"
+        f"**Team 1 (CT):** {team1_names}\n"
+        f"**Team 2 (T):** {team2_names}\n"
+        f"Match start -komento lähetetty.{connect_line}"
+    )
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
     if st.rc_timer_task and not st.rc_timer_task.done():
@@ -1897,6 +2371,13 @@ async def start_draft(interaction: discord.Interaction):
         except Exception:
             pass
     st.timer_msg = None
+    await _clear_veto_ui(st)
+    st.map_veto_active = False
+    st.map_pool = []
+    st.banned_maps = []
+    st.veto_order = []
+    st.veto_index = 0
+    st.selected_map = None
 
     pool = st.queue[:QUEUE_SIZE]
     random.shuffle(pool)
@@ -2465,6 +2946,13 @@ async def reset_cmd(interaction: discord.Interaction):
     st.captains = None
     st.last_pick_prefix = None
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
+    await _clear_veto_ui(st)
+    st.map_veto_active = False
+    st.map_pool = []
+    st.banned_maps = []
+    st.veto_order = []
+    st.veto_index = 0
+    st.selected_map = None
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
 
 @bot.tree.command(name="nocaptain", description="Estä bottia valitsemasta sinua kapteeniksi")
@@ -2532,6 +3020,43 @@ async def filltest_cmd(interaction: discord.Interaction):
         )
         await start_ready_timer(interaction, st)
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
+
+@bot.command(name="link")
+async def link_bang(ctx: commands.Context, steamid64: str):
+    steamid64 = steamid64.strip()
+    if not is_valid_steamid64(steamid64):
+        return await ctx.reply("Virheellinen SteamID64. Sen pitää olla 17 numeroa.")
+    if await bot.db.is_steamid_taken(steamid64, except_user_id=ctx.author.id):
+        return await ctx.reply("Tuo SteamID on jo linkattu toiselle.")
+    await bot.db.upsert_steam_link(ctx.author.id, steamid64)
+    await ctx.reply("SteamID linkattu.")
+
+@bot.command(name="unlink")
+async def unlink_bang(ctx: commands.Context):
+    existing = await bot.db.get_steamid(ctx.author.id)
+    if not existing:
+        return await ctx.reply("Sinulla ei ole linkkiä.")
+    await bot.db.delete_steam_link(ctx.author.id)
+    await ctx.reply("SteamID-linkki poistettu.")
+
+@bot.command(name="mysteam")
+async def mysteam_bang(ctx: commands.Context):
+    steamid64 = await bot.db.get_steamid(ctx.author.id)
+    if not steamid64:
+        return await ctx.reply("Et ole linkannut SteamID:tä.")
+    try:
+        await ctx.author.send(f"SteamID64: {steamid64}")
+        await ctx.reply("Lähetin SteamID:n DM:ään.")
+    except Exception:
+        await ctx.reply(f"SteamID64: {mask_steamid64(steamid64)}")
+
+@bot.command(name="startserver")
+async def startserver_bang(ctx: commands.Context):
+    if not ctx.author.guild_permissions.manage_guild:
+        return await ctx.reply("Vain ylläpito voi käynnistää serverin.")
+    interaction = InteractionShim(ctx)
+    st = bot.get_state(ctx.guild.id if ctx.guild else 0)
+    await start_server_orchestration(interaction, st)
 
 @bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "moti100", "join", "play", "pelataan", "pistämutjonoon", "gaming", "messiin", "liity", "mukaan", "lisäys", "nike", "puma", "josonpakko", "askel", "bugatti", "sievi", "kuoma", "jalas", "taasmenään", "hyllymbvör","eioomuutakaantekemistä","newbalance","onkopakko","asics","ejendals","roka","erect","suutujo","cs"])
 async def add_bang(ctx: commands.Context):

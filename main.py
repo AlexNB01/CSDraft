@@ -38,8 +38,6 @@ CS2_MATCH_CONFIG_DIR = os.getenv("CS2_MATCH_CONFIG_DIR", "./match_configs")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "css_matchzy_start")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
-CS2_LIVE_CFG_CMD = os.getenv("CS2_LIVE_CFG_CMD", "exec live.cfg")
-CS2_JOIN_POLL_SECONDS = int(os.getenv("CS2_JOIN_POLL_SECONDS", "5"))
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -165,9 +163,6 @@ class DraftState:
     veto_timer_msg: Optional[discord.Message] = None
     veto_timer_seq: int = 0
     selected_map: Optional[str] = None
-    server_watch_task: Optional[asyncio.Task] = None
-    live_cfg_sent: bool = False
-    expected_steamids: List[str] = field(default_factory=list)
     side_selection_active: bool = False
     side_selection_team: Optional[str] = None
     side_selection_msg: Optional[discord.Message] = None
@@ -1218,18 +1213,6 @@ def mask_steamid64(value: str) -> str:
 def remaining_maps(st: DraftState) -> List[str]:
     return [m for m in st.map_pool if m not in st.banned_maps]
 
-def parse_status_steamids(status_text: str) -> Set[str]:
-    steamids: Set[str] = set()
-    for line in status_text.splitlines():
-        match = re.search(r"\bSTEAM_[0-5]:[01]:\d+\b", line)
-        if match:
-            steamids.add(match.group(0))
-            continue
-        match = re.search(r"\b\d{17}\b", line)
-        if match:
-            steamids.add(match.group(0))
-    return steamids
-
 def extract_steamid64(text: str) -> Optional[str]:
     text = text.strip()
     if is_valid_steamid64(text):
@@ -2192,11 +2175,6 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
 
     team1_steamids = [steamid_for(uid) for uid in st.team1]
     team2_steamids = [steamid_for(uid) for uid in st.team2]
-    st.expected_steamids = [
-        steam_map[uid]
-        for uid in all_players
-        if uid in steam_map and uid not in st.fake_users
-    ]
     config_filename, config_data = _build_match_config(
         guild_id=interaction.guild_id or 0,
         game_id=st.game_id,
@@ -2228,9 +2206,6 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         f"Puolet: Team 1 **{st.team1_side}** / Team 2 **{st.team2_side}**"
         f"{connect_line}"
     )
-    if interaction.channel and st.expected_steamids:
-        await start_live_watch(st, interaction.channel)
-
 async def start_server_boot(interaction: discord.Interaction, st: DraftState) -> None:
     if not CS2_RCON_PASSWORD:
         await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
@@ -2242,53 +2217,6 @@ async def start_server_boot(interaction: discord.Interaction, st: DraftState) ->
     except Exception as exc:
         print(f"RCON yhteys epäonnistui: {exc}")
         await interaction.followup.send("Serveriin ei saatu yhteyttä, mutta drafti jatkuu.")
-
-async def start_live_watch(st: DraftState, channel: discord.abc.Messageable) -> None:
-    if st.server_watch_task and not st.server_watch_task.done():
-        return
-    st.live_cfg_sent = False
-    st.server_watch_task = asyncio.create_task(_watch_for_live(st, channel))
-
-async def _watch_for_live(st: DraftState, channel: discord.abc.Messageable) -> None:
-    if not st.expected_steamids:
-        return
-    expected_set = set(st.expected_steamids)
-
-    async def fetch_status() -> Optional[str]:
-        def _do() -> Optional[str]:
-            try:
-                with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
-                    return rcon.command("status")
-            except Exception as exc:
-                print(f"RCON status epäonnistui: {exc}")
-                return None
-        return await asyncio.to_thread(_do)
-
-    async def send_live_cfg() -> bool:
-        def _do() -> bool:
-            try:
-                with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
-                    rcon.command(CS2_LIVE_CFG_CMD)
-                return True
-            except Exception as exc:
-                print(f"RCON live.cfg epäonnistui: {exc}")
-                return False
-        return await asyncio.to_thread(_do)
-
-    while not st.live_cfg_sent:
-        status = await fetch_status()
-        if status:
-            connected = parse_status_steamids(status)
-            if expected_set.issubset(connected):
-                ok = await send_live_cfg()
-                if ok:
-                    st.live_cfg_sent = True
-                    try:
-                        await channel.send("Kaikki pelaajat liittyneet, live.cfg ajettu.")
-                    except Exception:
-                        pass
-                return
-        await asyncio.sleep(max(1, CS2_JOIN_POLL_SECONDS))
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
     if st.rc_timer_task and not st.rc_timer_task.done():
@@ -2595,11 +2523,6 @@ async def start_draft(interaction: discord.Interaction):
     st.side_selection_msg = None
     st.team1_side = "CT"
     st.team2_side = "T"
-    if st.server_watch_task and not st.server_watch_task.done():
-        st.server_watch_task.cancel()
-    st.server_watch_task = None
-    st.live_cfg_sent = False
-    st.expected_steamids = []
 
     pool = st.queue[:QUEUE_SIZE]
     random.shuffle(pool)
@@ -3186,11 +3109,6 @@ async def reset_cmd(interaction: discord.Interaction):
     st.side_selection_msg = None
     st.team1_side = "CT"
     st.team2_side = "T"
-    if st.server_watch_task and not st.server_watch_task.done():
-        st.server_watch_task.cancel()
-    st.server_watch_task = None
-    st.live_cfg_sent = False
-    st.expected_steamids = []
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
 
 @bot.tree.command(name="nocaptain", description="Estä bottia valitsemasta sinua kapteeniksi")

@@ -40,7 +40,6 @@ CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
 CS2_LIVE_CFG_CMD = os.getenv("CS2_LIVE_CFG_CMD", "exec live.cfg")
 CS2_JOIN_POLL_SECONDS = int(os.getenv("CS2_JOIN_POLL_SECONDS", "5"))
-CS2_JOIN_TIMEOUT_SECONDS = int(os.getenv("CS2_JOIN_TIMEOUT_SECONDS", "300"))
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -2147,7 +2146,6 @@ async def start_server_boot(interaction: discord.Interaction, st: DraftState) ->
         with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
             rcon.command("status")
             rcon.command(CS2_COMP_CFG_CMD)
-        await interaction.followup.send("Serveri käynnistetään, drafti voi alkaa.")
     except Exception as exc:
         print(f"RCON yhteys epäonnistui: {exc}")
         await interaction.followup.send("Serveriin ei saatu yhteyttä, mutta drafti jatkuu.")
@@ -2161,7 +2159,6 @@ async def start_live_watch(st: DraftState, channel: discord.abc.Messageable) -> 
 async def _watch_for_live(st: DraftState, channel: discord.abc.Messageable) -> None:
     if not st.expected_steamids:
         return
-    deadline = asyncio.get_running_loop().time() + CS2_JOIN_TIMEOUT_SECONDS
     expected_set = set(st.expected_steamids)
 
     async def fetch_status() -> Optional[str]:
@@ -2185,7 +2182,7 @@ async def _watch_for_live(st: DraftState, channel: discord.abc.Messageable) -> N
                 return False
         return await asyncio.to_thread(_do)
 
-    while asyncio.get_running_loop().time() < deadline and not st.live_cfg_sent:
+    while not st.live_cfg_sent:
         status = await fetch_status()
         if status:
             connected = parse_status_steamids(status)

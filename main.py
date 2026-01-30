@@ -2232,6 +2232,7 @@ def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
     last_response = ""
     for cmd in _match_start_cmds():
         rcon_arg = _resolve_matchzy_rcon_arg(cmd, config_filename)
+        print(f"Lähetetään MatchZy-käynnistys: {cmd} {rcon_arg}")
         response = rcon.command(f"{cmd} {rcon_arg}")
         last_response = response or ""
         if "unknown command" in last_response.lower():

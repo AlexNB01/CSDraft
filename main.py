@@ -9,6 +9,7 @@ import struct
 import typing
 import re
 import urllib.request
+import urllib.parse
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
@@ -2264,10 +2265,19 @@ def _resolve_matchzy_rcon_arg(cmd: str, config_filename: str) -> str:
             raise ConnectionError(
                 "CS2_MATCH_CONFIG_URL_BASE puuttuu matchzy_loadmatch_url-käynnistyksessä."
             )
-        base = CS2_MATCH_CONFIG_URL_BASE.strip()
-        if not base.endswith("/"):
-            base = f"{base}/"
-        return f"{base}{config_filename}"
+        base = CS2_MATCH_CONFIG_URL_BASE.strip().replace("\\", "/")
+        if "{filename}" in base:
+            url = base.replace("{filename}", config_filename)
+        else:
+            if not base.endswith("/"):
+                base = f"{base}/"
+            url = f"{base}{config_filename}"
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ConnectionError(
+                "CS2_MATCH_CONFIG_URL_BASE pitää olla kelvollinen http(s)-URL."
+            )
+        return url
     return _resolve_matchzy_rcon_path(config_filename)
 
 async def start_server_orchestration(interaction: discord.Interaction, st: DraftState):

@@ -9,6 +9,7 @@ import struct
 import typing
 import re
 import urllib.request
+import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -35,9 +36,16 @@ CS2_RCON_HOST = os.getenv("CS2_RCON_HOST", "127.0.0.1")
 CS2_RCON_PORT = int(os.getenv("CS2_RCON_PORT", "27015"))
 CS2_RCON_PASSWORD = os.getenv("CS2_RCON_PASSWORD", "")
 CS2_MATCH_CONFIG_DIR = os.getenv("CS2_MATCH_CONFIG_DIR", "./match_configs")
-CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "css_matchzy_start")
+CS2_MATCH_CONFIG_TARGET_DIR = os.getenv("CS2_MATCH_CONFIG_TARGET_DIR", "")
+CS2_MATCH_CONFIG_FORMAT = os.getenv("CS2_MATCH_CONFIG_FORMAT", "matchzy")
+CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
+CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_start")
+CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
+CS2_SERVER_START_SCRIPT = os.getenv("CS2_SERVER_START_SCRIPT", "")
+CS2_SERVER_START_WORKDIR = os.getenv("CS2_SERVER_START_WORKDIR", "")
+CS2_SERVER_START_WAIT_SECONDS = int(os.getenv("CS2_SERVER_START_WAIT_SECONDS", "12"))
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -2134,15 +2142,102 @@ def _build_match_config(
 ) -> Tuple[str, dict]:
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
-    config = {
-        "map": selected_map,
-        "ruleset": "competitive",
-        "team1_side": team1_side,
-        "team2_side": team2_side,
-        "team1": team1_ids,
-        "team2": team2_ids,
-    }
+    config_format = (CS2_MATCH_CONFIG_FORMAT or "matchzy").strip().lower()
+    if config_format == "legacy":
+        config = {
+            "map": selected_map,
+            "ruleset": "competitive",
+            "team1_side": team1_side,
+            "team2_side": team2_side,
+            "team1": team1_ids,
+            "team2": team2_ids,
+        }
+    else:
+        config = {
+            "matchid": str(game_id),
+            "num_maps": 1,
+            "maplist": [selected_map],
+            "skip_veto": True,
+            "side_type": "standard",
+            "team1": {
+                "name": "Team 1",
+                "players": team1_ids,
+                "side": team1_side,
+            },
+            "team2": {
+                "name": "Team 2",
+                "players": team2_ids,
+                "side": team2_side,
+            },
+        }
+    extra = _load_match_config_extras()
+    if extra:
+        config.update(extra)
     return filename, config
+
+def _load_match_config_extras() -> dict:
+    if not CS2_MATCH_CONFIG_EXTRA_JSON:
+        return {}
+    try:
+        payload = json.loads(CS2_MATCH_CONFIG_EXTRA_JSON)
+    except json.JSONDecodeError:
+        print("CS2_MATCH_CONFIG_EXTRA_JSON ei ole kelvollista JSONia.")
+        return {}
+    if not isinstance(payload, dict):
+        print("CS2_MATCH_CONFIG_EXTRA_JSON pitää olla JSON-objekti.")
+        return {}
+    return payload
+
+def _match_start_cmds() -> List[str]:
+    if CS2_MATCH_PLUGIN_START_CMDS.strip():
+        cmds = [cmd.strip() for cmd in CS2_MATCH_PLUGIN_START_CMDS.split(",") if cmd.strip()]
+        return list(dict.fromkeys(cmds))
+    cmds = [CS2_MATCH_PLUGIN_START_CMD]
+    for fallback in ("matchzy_start", "css_matchzy_start"):
+        if fallback not in cmds:
+            cmds.append(fallback)
+    return list(dict.fromkeys(cmds))
+
+def _write_match_config(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    if CS2_MATCH_CONFIG_TARGET_DIR:
+        os.makedirs(CS2_MATCH_CONFIG_TARGET_DIR, exist_ok=True)
+        target_path = os.path.join(CS2_MATCH_CONFIG_TARGET_DIR, os.path.basename(path))
+        shutil.copy2(path, target_path)
+
+def _start_server_process_if_configured() -> None:
+    if not CS2_SERVER_START_SCRIPT:
+        return
+    try:
+        if CS2_SERVER_START_SCRIPT.lower().endswith((".bat", ".cmd")):
+            cmd = ["cmd.exe", "/c", CS2_SERVER_START_SCRIPT]
+        else:
+            cmd = [CS2_SERVER_START_SCRIPT]
+        subprocess.Popen(
+            cmd,
+            cwd=CS2_SERVER_START_WORKDIR or None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        print(f"Serverin start-scriptin käynnistys epäonnistui: {exc}")
+
+def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
+    last_response = ""
+    for cmd in _match_start_cmds():
+        response = rcon.command(f"{cmd} {config_filename}")
+        last_response = response or ""
+        if "unknown command" in last_response.lower():
+            continue
+        if "unknown" in last_response.lower() and "command" in last_response.lower():
+            continue
+        return
+    raise ConnectionError(
+        "MatchZy-käynnistys epäonnistui. Tarkista CS2_MATCH_PLUGIN_START_CMD/CMDS."
+        f" Viimeisin vastaus: {last_response}"
+    )
 
 async def start_server_orchestration(interaction: discord.Interaction, st: DraftState):
     if not st.team1 or not st.team2 or not st.selected_map:
@@ -2167,7 +2262,6 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
         return
 
-    os.makedirs(CS2_MATCH_CONFIG_DIR, exist_ok=True)
     def steamid_for(uid: int) -> str:
         if uid in steam_map:
             return steam_map[uid]
@@ -2184,10 +2278,9 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         team1_side=st.team1_side,
         team2_side=st.team2_side,
     )
-    config_path = os.path.join(CS2_MATCH_CONFIG_DIR, config_filename)
     try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+        config_path = os.path.join(CS2_MATCH_CONFIG_DIR, config_filename)
+        _write_match_config(config_path, config_data)
     except Exception:
         await interaction.followup.send("Match configin kirjoitus epäonnistui.")
         return
@@ -2195,7 +2288,7 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
     try:
         with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
             rcon.command(f"changelevel {st.selected_map}")
-            rcon.command(f"{CS2_MATCH_PLUGIN_START_CMD} {config_filename}")
+            _rcon_start_match(rcon, config_filename)
     except Exception as exc:
         await interaction.followup.send(f"RCON epäonnistui: {exc}")
         return
@@ -2210,6 +2303,9 @@ async def start_server_boot(interaction: discord.Interaction, st: DraftState) ->
     if not CS2_RCON_PASSWORD:
         await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
         return
+    _start_server_process_if_configured()
+    if CS2_SERVER_START_SCRIPT and CS2_SERVER_START_WAIT_SECONDS > 0:
+        await asyncio.sleep(CS2_SERVER_START_WAIT_SECONDS)
     try:
         with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
             rcon.command("status")

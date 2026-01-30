@@ -51,6 +51,27 @@ AUTO_VOICE_CHANNELS = True         # Enable automatic voice channel moves
 EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 ```
 
+### MatchZy + CSSharp integration
+
+This bot can generate MatchZy configs and trigger MatchZy via RCON. Configure these environment variables (for example in a `.env` file):
+
+```
+CS2_RCON_HOST=127.0.0.1
+CS2_RCON_PORT=27015
+CS2_RCON_PASSWORD=your_rcon_password
+CS2_MATCH_CONFIG_FORMAT=matchzy
+CS2_MATCH_CONFIG_DIR=./match_configs
+CS2_MATCH_CONFIG_TARGET_DIR=C:\CSServer\game\csgo\addons\counterstrikesharp\plugins\MatchZy\match_configs
+CS2_MATCH_PLUGIN_START_CMD=matchzy_start
+CS2_MATCH_PLUGIN_START_CMDS=matchzy_start,css_matchzy_start
+CS2_SERVER_START_SCRIPT=C:\CSServer\start.bat
+CS2_SERVER_START_WORKDIR=C:\CSServer
+```
+
+- `CS2_MATCH_CONFIG_TARGET_DIR` copies the generated JSON into your MatchZy config folder.
+- `CS2_MATCH_PLUGIN_START_CMDS` allows the bot to try multiple MatchZy commands until one works.
+- `CS2_SERVER_START_SCRIPT` starts the CS server automatically (optional).
+
 ## Commands
 
 ### Player Commands

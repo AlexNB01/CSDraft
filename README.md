@@ -71,6 +71,7 @@ CS2_SERVER_START_WORKDIR=C:\CSServer
 
 - `CS2_MATCH_CONFIG_TARGET_DIR` copies the generated JSON into your MatchZy config folder.
 - `CS2_MATCH_CONFIG_RCON_DIR` should be the path (relative to `csgo/`) used by `matchzy_loadmatch`.
+- If `CS2_MATCH_CONFIG_RCON_DIR` is empty and the target path contains `csgo/`, the bot will auto-derive the relative RCON path.
 - `CS2_MATCH_PLUGIN_START_CMDS` allows the bot to try multiple MatchZy commands until one works (comma-separated).
 - `CS2_SERVER_START_SCRIPT` starts the CS server automatically (optional).
 

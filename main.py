@@ -2222,10 +2222,7 @@ def _start_server_process_if_configured() -> None:
         print(f"Serverin start-scriptin käynnistys epäonnistui: {exc}")
 
 def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
-    rcon_path = config_filename
-    if CS2_MATCH_CONFIG_RCON_DIR:
-        rcon_path = os.path.join(CS2_MATCH_CONFIG_RCON_DIR, config_filename)
-    rcon_path = rcon_path.replace("\\", "/")
+    rcon_path = _resolve_matchzy_rcon_path(config_filename)
     last_response = ""
     for cmd in _match_start_cmds():
         response = rcon.command(f"{cmd} {rcon_path}")
@@ -2239,6 +2236,20 @@ def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
         "MatchZy-käynnistys epäonnistui. Tarkista CS2_MATCH_PLUGIN_START_CMD/CMDS."
         f" Viimeisin vastaus: {last_response}"
     )
+
+def _resolve_matchzy_rcon_path(config_filename: str) -> str:
+    if CS2_MATCH_CONFIG_RCON_DIR:
+        return os.path.join(CS2_MATCH_CONFIG_RCON_DIR, config_filename).replace("\\", "/")
+    if CS2_MATCH_CONFIG_TARGET_DIR:
+        normalized = CS2_MATCH_CONFIG_TARGET_DIR.replace("\\", "/")
+        lower = normalized.lower()
+        marker = "/csgo/"
+        idx = lower.find(marker)
+        if idx != -1:
+            rel = normalized[idx + len(marker):].strip("/")
+            if rel:
+                return f"{rel}/{config_filename}"
+    return config_filename
 
 async def start_server_orchestration(interaction: discord.Interaction, st: DraftState):
     if not st.team1 or not st.team2 or not st.selected_map:

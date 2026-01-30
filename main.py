@@ -48,11 +48,11 @@ PICK_ORDER = [
 MAP_POOL = [
     "de_ancient",
     "de_anubis",
+    "de_dust2",
     "de_inferno",
     "de_mirage",
     "de_nuke",
     "de_overpass",
-    "de_vertigo",
 ]
 
 # ---- Elo settings ----
@@ -2059,7 +2059,7 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
 
     all_players = st.team1 + st.team2
     steam_map = await bot.db.get_steamids(all_players)
-    missing = [uid for uid in all_players if uid not in steam_map]
+    missing = [uid for uid in all_players if uid not in steam_map and uid not in st.fake_users]
     if missing:
         missing_mentions = ", ".join(mention(uid) for uid in missing)
         await interaction.followup.send(
@@ -2073,8 +2073,13 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         return
 
     os.makedirs(CS2_MATCH_CONFIG_DIR, exist_ok=True)
-    team1_steamids = [steam_map[uid] for uid in st.team1]
-    team2_steamids = [steam_map[uid] for uid in st.team2]
+    def steamid_for(uid: int) -> str:
+        if uid in steam_map:
+            return steam_map[uid]
+        return f"{uid:017d}"
+
+    team1_steamids = [steamid_for(uid) for uid in st.team1]
+    team2_steamids = [steamid_for(uid) for uid in st.team2]
     config_filename, config_data = _build_match_config(
         guild_id=interaction.guild_id or 0,
         game_id=st.game_id,
@@ -2107,6 +2112,17 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         f"**Team 2 (T):** {team2_names}\n"
         f"Match start -komento lähetetty.{connect_line}"
     )
+
+async def start_server_boot(interaction: discord.Interaction, st: DraftState) -> None:
+    if not CS2_RCON_PASSWORD:
+        await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
+        return
+    try:
+        with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
+            rcon.command("status")
+        await interaction.followup.send("Serveri käynnistetään, drafti voi alkaa.")
+    except Exception:
+        await interaction.followup.send("Serveriin ei saatu yhteyttä, mutta drafti jatkuu.")
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
     if st.rc_timer_task and not st.rc_timer_task.done():
@@ -2470,6 +2486,7 @@ async def start_draft(interaction: discord.Interaction):
 
 
     await interaction.followup.send(header, ephemeral=False)
+    await start_server_boot(interaction, st)
     await announce_next_picker(interaction, st)
 
 @bot.tree.command(name="pick", description="Kapteenin valintakomento (esim. /pick 3)")

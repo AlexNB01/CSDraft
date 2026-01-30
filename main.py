@@ -37,9 +37,10 @@ CS2_RCON_PORT = int(os.getenv("CS2_RCON_PORT", "27015"))
 CS2_RCON_PASSWORD = os.getenv("CS2_RCON_PASSWORD", "")
 CS2_MATCH_CONFIG_DIR = os.getenv("CS2_MATCH_CONFIG_DIR", "./match_configs")
 CS2_MATCH_CONFIG_TARGET_DIR = os.getenv("CS2_MATCH_CONFIG_TARGET_DIR", "")
+CS2_MATCH_CONFIG_RCON_DIR = os.getenv("CS2_MATCH_CONFIG_RCON_DIR", "")
 CS2_MATCH_CONFIG_FORMAT = os.getenv("CS2_MATCH_CONFIG_FORMAT", "matchzy")
 CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
-CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_start")
+CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
@@ -2221,9 +2222,13 @@ def _start_server_process_if_configured() -> None:
         print(f"Serverin start-scriptin käynnistys epäonnistui: {exc}")
 
 def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
+    rcon_path = config_filename
+    if CS2_MATCH_CONFIG_RCON_DIR:
+        rcon_path = os.path.join(CS2_MATCH_CONFIG_RCON_DIR, config_filename)
+    rcon_path = rcon_path.replace("\\", "/")
     last_response = ""
     for cmd in _match_start_cmds():
-        response = rcon.command(f"{cmd} {config_filename}")
+        response = rcon.command(f"{cmd} {rcon_path}")
         last_response = response or ""
         if "unknown command" in last_response.lower():
             continue

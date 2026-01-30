@@ -67,6 +67,13 @@ export CS2_SERVER_COMMAND="./start_cs2_server.sh --map \"{map}\" --ruleset compe
 export CS2_SERVER_IP="203.0.113.42:27015"
 ```
 
+Windows example using the included `cs2server.bat` (expects server files in `C:\CSServer`):
+
+```bat
+set CS2_SERVER_COMMAND=cs2server.bat "{map}"
+set CS2_SERVER_IP=203.0.113.42:27015
+```
+
 ## Commands
 
 ### Player Commands

@@ -2266,6 +2266,12 @@ def _resolve_matchzy_rcon_arg(cmd: str, config_filename: str) -> str:
                 "CS2_MATCH_CONFIG_URL_BASE puuttuu matchzy_loadmatch_url-käynnistyksessä."
             )
         base = CS2_MATCH_CONFIG_URL_BASE.strip().replace("\\", "/")
+        if base.lower().startswith("http") and not (
+            base.lower().startswith("http://") or base.lower().startswith("https://")
+        ):
+            raise ConnectionError(
+                "CS2_MATCH_CONFIG_URL_BASE pitää alkaa http:// tai https:// -osoitteella."
+            )
         if "{filename}" in base:
             url = base.replace("{filename}", config_filename)
         else:

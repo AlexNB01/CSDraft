@@ -38,9 +38,10 @@ CS2_RCON_PASSWORD = os.getenv("CS2_RCON_PASSWORD", "")
 CS2_MATCH_CONFIG_DIR = os.getenv("CS2_MATCH_CONFIG_DIR", "./match_configs")
 CS2_MATCH_CONFIG_TARGET_DIR = os.getenv("CS2_MATCH_CONFIG_TARGET_DIR", "")
 CS2_MATCH_CONFIG_RCON_DIR = os.getenv("CS2_MATCH_CONFIG_RCON_DIR", "")
+CS2_MATCH_CONFIG_URL_BASE = os.getenv("CS2_MATCH_CONFIG_URL_BASE", "")
 CS2_MATCH_CONFIG_FORMAT = os.getenv("CS2_MATCH_CONFIG_FORMAT", "matchzy")
 CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
-CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
+CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch_url")
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
@@ -2145,7 +2146,9 @@ def _build_match_config(
     filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
     config_format = (CS2_MATCH_CONFIG_FORMAT or "matchzy").strip().lower()
     start_cmds = f"{CS2_MATCH_PLUGIN_START_CMD},{CS2_MATCH_PLUGIN_START_CMDS}".lower()
-    if config_format == "legacy" and "matchzy_loadmatch" in start_cmds:
+    if config_format == "legacy" and (
+        "matchzy_loadmatch" in start_cmds or "matchzy_loadmatch_url" in start_cmds
+    ):
         config_format = "matchzy"
     if config_format == "legacy":
         config = {
@@ -2225,10 +2228,10 @@ def _start_server_process_if_configured() -> None:
         print(f"Serverin start-scriptin käynnistys epäonnistui: {exc}")
 
 def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
-    rcon_path = _resolve_matchzy_rcon_path(config_filename)
     last_response = ""
     for cmd in _match_start_cmds():
-        response = rcon.command(f"{cmd} {rcon_path}")
+        rcon_arg = _resolve_matchzy_rcon_arg(cmd, config_filename)
+        response = rcon.command(f"{cmd} {rcon_arg}")
         last_response = response or ""
         if "unknown command" in last_response.lower():
             continue
@@ -2253,6 +2256,19 @@ def _resolve_matchzy_rcon_path(config_filename: str) -> str:
             if rel:
                 return f"{rel}/{config_filename}"
     return config_filename
+
+def _resolve_matchzy_rcon_arg(cmd: str, config_filename: str) -> str:
+    lowered = cmd.lower()
+    if "matchzy_loadmatch_url" in lowered:
+        if not CS2_MATCH_CONFIG_URL_BASE.strip():
+            raise ConnectionError(
+                "CS2_MATCH_CONFIG_URL_BASE puuttuu matchzy_loadmatch_url-käynnistyksessä."
+            )
+        base = CS2_MATCH_CONFIG_URL_BASE.strip()
+        if not base.endswith("/"):
+            base = f"{base}/"
+        return f"{base}{config_filename}"
+    return _resolve_matchzy_rcon_path(config_filename)
 
 async def start_server_orchestration(interaction: discord.Interaction, st: DraftState):
     if not st.team1 or not st.team2 or not st.selected_map:

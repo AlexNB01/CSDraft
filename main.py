@@ -2222,14 +2222,11 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         await interaction.followup.send(f"RCON epäonnistui: {exc}")
         return
 
-    team1_names = " ".join(mention(uid) for uid in st.team1)
-    team2_names = " ".join(mention(uid) for uid in st.team2)
     connect_line = f"\nYhdistä: `{CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
     await interaction.followup.send(
-        f"Serveri käynnistetään kartalla **{st.selected_map}**.\n"
-        f"**Team 1 (CT):** {team1_names}\n"
-        f"**Team 2 (T):** {team2_names}\n"
-        f"Match start -komento lähetetty.{connect_line}"
+        f"Kartta: **{st.selected_map}**\n"
+        f"Puolet: Team 1 **{st.team1_side}** / Team 2 **{st.team2_side}**"
+        f"{connect_line}"
     )
     if interaction.channel and st.expected_steamids:
         await start_live_watch(st, interaction.channel)

@@ -63,13 +63,13 @@ CS2_MATCH_CONFIG_FORMAT=matchzy
 CS2_MATCH_CONFIG_DIR=./match_configs
 CS2_MATCH_CONFIG_TARGET_DIR=C:\CSServer\game\csgo\addons\counterstrikesharp\plugins\MatchZy\match_configs
 CS2_MATCH_PLUGIN_START_CMD=matchzy_start
-CS2_MATCH_PLUGIN_START_CMDS=matchzy_start,css_matchzy_start
+CS2_MATCH_PLUGIN_START_CMDS=matchzy_start
 CS2_SERVER_START_SCRIPT=C:\CSServer\start.bat
 CS2_SERVER_START_WORKDIR=C:\CSServer
 ```
 
 - `CS2_MATCH_CONFIG_TARGET_DIR` copies the generated JSON into your MatchZy config folder.
-- `CS2_MATCH_PLUGIN_START_CMDS` allows the bot to try multiple MatchZy commands until one works.
+- `CS2_MATCH_PLUGIN_START_CMDS` allows the bot to try multiple MatchZy commands until one works (comma-separated).
 - `CS2_SERVER_START_SCRIPT` starts the CS server automatically (optional).
 
 ## Commands

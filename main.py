@@ -2192,11 +2192,7 @@ def _match_start_cmds() -> List[str]:
     if CS2_MATCH_PLUGIN_START_CMDS.strip():
         cmds = [cmd.strip() for cmd in CS2_MATCH_PLUGIN_START_CMDS.split(",") if cmd.strip()]
         return list(dict.fromkeys(cmds))
-    cmds = [CS2_MATCH_PLUGIN_START_CMD]
-    for fallback in ("matchzy_start", "css_matchzy_start"):
-        if fallback not in cmds:
-            cmds.append(fallback)
-    return list(dict.fromkeys(cmds))
+    return [CS2_MATCH_PLUGIN_START_CMD]
 
 def _write_match_config(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)

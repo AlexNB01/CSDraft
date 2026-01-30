@@ -7,6 +7,8 @@ import datetime
 import socket
 import struct
 import typing
+import re
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -1204,6 +1206,29 @@ def mask_steamid64(value: str) -> str:
 
 def remaining_maps(st: DraftState) -> List[str]:
     return [m for m in st.map_pool if m not in st.banned_maps]
+
+def extract_steamid64(text: str) -> Optional[str]:
+    text = text.strip()
+    if is_valid_steamid64(text):
+        return text
+    match = re.search(r"(?:/profiles/)(\d{17})", text)
+    if match:
+        return match.group(1)
+    return None
+
+def resolve_vanity_steamid64(url: str) -> Optional[str]:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+    match = re.search(r'"steamid":"(\d{17})"', content)
+    if match:
+        return match.group(1)
+    match = re.search(r'"steamid"\s*:\s*"(\d{17})"', content)
+    if match:
+        return match.group(1)
+    return None
 
 class PickButton(discord.ui.Button):
     def __init__(self, uid: int, label: str, row: int):
@@ -3023,12 +3048,15 @@ async def filltest_cmd(interaction: discord.Interaction):
 
 @bot.command(name="link")
 async def link_bang(ctx: commands.Context, steamid64: str):
-    steamid64 = steamid64.strip()
-    if not is_valid_steamid64(steamid64):
-        return await ctx.reply("Virheellinen SteamID64. Sen pitää olla 17 numeroa.")
-    if await bot.db.is_steamid_taken(steamid64, except_user_id=ctx.author.id):
+    raw = steamid64.strip()
+    resolved = extract_steamid64(raw)
+    if not resolved and "steamcommunity.com/id/" in raw:
+        resolved = resolve_vanity_steamid64(raw)
+    if not resolved:
+        return await ctx.reply("Virheellinen SteamID64 tai profiililinkki.")
+    if await bot.db.is_steamid_taken(resolved, except_user_id=ctx.author.id):
         return await ctx.reply("Tuo SteamID on jo linkattu toiselle.")
-    await bot.db.upsert_steam_link(ctx.author.id, steamid64)
+    await bot.db.upsert_steam_link(ctx.author.id, resolved)
     await ctx.reply("SteamID linkattu.")
 
 @bot.command(name="unlink")

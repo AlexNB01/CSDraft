@@ -2144,6 +2144,9 @@ def _build_match_config(
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
     config_format = (CS2_MATCH_CONFIG_FORMAT or "matchzy").strip().lower()
+    start_cmds = f"{CS2_MATCH_PLUGIN_START_CMD},{CS2_MATCH_PLUGIN_START_CMDS}".lower()
+    if config_format == "legacy" and "matchzy_loadmatch" in start_cmds:
+        config_format = "matchzy"
     if config_format == "legacy":
         config = {
             "map": selected_map,

@@ -26,6 +26,8 @@ AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
 TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
 VOICE_LOBBY_CHANNEL_ID = 364497233061871628
+CS2_SERVER_COMMAND = os.getenv("CS2_SERVER_COMMAND", "").strip()
+CS2_SERVER_IP = os.getenv("CS2_SERVER_IP", "").strip()
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -34,6 +36,16 @@ EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 PICK_ORDER = [
     "team1", "team2", "team1", "team2", "team1", "team2", "team2"
 ]
+MAP_POOL = [
+    "Ancient",
+    "Anubis",
+    "Dust II",
+    "Inferno",
+    "Mirage",
+    "Nuke",
+    "Overpass",
+]
+MAP_BAN_ORDER = ["team1", "team2", "team1", "team2", "team1", "team2"]
 
 # ---- Elo settings ----
 INITIAL_RATING = 1000.0
@@ -131,6 +143,12 @@ class DraftState:
     rc_deadline_ts: Optional[float] = None
     pick_timer_seq: int = 0    
     game_id: Optional[int] = None
+    map_draft_active: bool = False
+    map_pool: List[str] = field(default_factory=list)
+    map_bans: List[Tuple[str, str]] = field(default_factory=list)
+    map_ban_index: int = 0
+    map_msg: Optional[discord.Message] = None
+    last_map_prefix: Optional[str] = None
 
 
 # -----------------------------
@@ -1128,6 +1146,27 @@ async def build_pick_view(interaction: discord.Interaction, st: DraftState) -> d
         button_data.append((uid, name))
     return PickView(st, button_data)
 
+class MapBanButton(discord.ui.Button):
+    def __init__(self, map_name: str, row: int):
+        super().__init__(
+            style=discord.ButtonStyle.danger,
+            label=map_name,
+            row=row,
+            custom_id=f"map_ban_{map_name}",
+        )
+        self.map_name = map_name
+
+    async def callback(self, interaction: discord.Interaction):
+        view = typing.cast("MapBanView", self.view)
+        await handle_map_ban_selection(interaction, view.state, self.map_name)
+
+class MapBanView(discord.ui.View):
+    def __init__(self, state: DraftState, maps: List[str]):
+        super().__init__(timeout=None)
+        self.state = state
+        for idx, map_name in enumerate(maps):
+            self.add_item(MapBanButton(map_name, row=idx // 5))
+
 async def handle_pick_selection(interaction: discord.Interaction, st: DraftState, uid: int) -> None:
     if not st.draft_active:
         return await interaction.response.send_message("Draft ei ole käynnissä.", ephemeral=True)
@@ -1373,20 +1412,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
                 )
             )
 
-        drafted = set(st.team1 + st.team2)
-        st.queue = [u for u in st.queue if u not in drafted]
-        st.queue_joined_at = {
-            uid: joined_at
-            for uid, joined_at in st.queue_joined_at.items()
-            if uid in st.queue
-        }
         st.draft_active = False
-        st.captains = None
-        st.team1.clear(); st.team2.clear(); st.pick_pool.clear()
-        st.pick_index = 0
-        st.number_by_uid.clear()
-        st.last_pick_prefix = None 
-
         if st.pick_timer_task and not st.pick_timer_task.done():
             st.pick_timer_task.cancel()
         st.pick_timer_task = None
@@ -1397,6 +1423,8 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
                 pass
         st.timer_msg = None
         st.pick_msg = None
+
+        await start_map_draft(interaction, st)
         return
 
     if st.pick_timer_task and not st.pick_timer_task.done():
@@ -1410,6 +1438,158 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
     st.timer_msg = None
 
     await announce_next_picker(interaction, st)
+
+async def build_map_block(st: DraftState) -> str:
+    if not st.map_pool:
+        return "```\nKartat:\n(ei jäljellä)\n```"
+    lines = [f"- {name}" for name in st.map_pool]
+    return "```\nKartat:\n" + "\n".join(lines) + "\n```"
+
+async def announce_next_map_ban(interaction: discord.Interaction, st: DraftState, prefix: Optional[str] = None):
+    if st.map_ban_index >= len(MAP_BAN_ORDER):
+        return
+
+    team = MAP_BAN_ORDER[st.map_ban_index]
+    captain = st.captains[0] if team == "team1" else st.captains[1]
+    head = prefix if prefix is not None else (st.last_map_prefix or "")
+    st.last_map_prefix = None
+    if head and not head.endswith("\n"):
+        head += "\n"
+
+    map_block = await build_map_block(st)
+    content = (
+        f"{head}"
+        f"**Karttadrafti**\n"
+        f"Seuraava banni: {mention(captain)}\n\n"
+        f"Valitse kartta buttoneilla tai komennolla !banmap <kartta>\n\n"
+        f"{map_block}\n"
+    )
+    view = MapBanView(st, st.map_pool)
+
+    if st.map_msg:
+        try:
+            st.map_msg = await st.map_msg.edit(content=content, view=view)
+        except Exception:
+            st.map_msg = await interaction.followup.send(content, view=view, ephemeral=False)
+    else:
+        st.map_msg = await interaction.followup.send(content, view=view, ephemeral=False)
+
+async def handle_map_ban_selection(interaction: discord.Interaction, st: DraftState, map_name: str) -> None:
+    if not st.map_draft_active:
+        return await interaction.response.send_message("Karttadrafti ei ole käynnissä.", ephemeral=True)
+
+    if st.map_ban_index >= len(MAP_BAN_ORDER):
+        return await interaction.response.send_message("Kartat on jo bannattu.", ephemeral=True)
+
+    if map_name not in st.map_pool:
+        return await interaction.response.send_message("Karttaa ei ole enää valittavissa.", ephemeral=True)
+
+    team = MAP_BAN_ORDER[st.map_ban_index]
+    expected_captain = st.captains[0] if team == "team1" else st.captains[1]
+    if interaction.user.id != expected_captain:
+        return await interaction.response.send_message(
+            "Vain vuorossa oleva kapteeni voi bannata kartan.",
+            ephemeral=True,
+        )
+
+    await interaction.response.defer(thinking=False)
+    await _apply_map_ban(interaction, st, map_name)
+
+async def _apply_map_ban(interaction: discord.Interaction, st: DraftState, map_name: str) -> None:
+    if map_name not in st.map_pool:
+        return
+
+    st.map_pool.remove(map_name)
+    team = MAP_BAN_ORDER[st.map_ban_index]
+    st.map_bans.append((team, map_name))
+    st.map_ban_index += 1
+
+    team_num = 1 if team == "team1" else 2
+    st.last_map_prefix = f"Team {team_num} bannasi kartan **{map_name}**."
+
+    if len(st.map_pool) <= 1 or st.map_ban_index >= len(MAP_BAN_ORDER):
+        await finish_map_draft(interaction, st)
+        return
+
+    st.map_msg = None
+    await announce_next_map_ban(interaction, st)
+
+async def start_map_draft(interaction: discord.Interaction, st: DraftState) -> None:
+    st.map_draft_active = True
+    st.map_pool = MAP_POOL.copy()
+    st.map_bans.clear()
+    st.map_ban_index = 0
+    st.map_msg = None
+    st.last_map_prefix = None
+    await interaction.followup.send(
+        "Joukkueet ovat valmiit! Karttadrafti alkaa nyt.",
+        ephemeral=False,
+    )
+    await announce_next_map_ban(interaction, st)
+
+async def finish_map_draft(interaction: discord.Interaction, st: DraftState) -> None:
+    if st.map_msg:
+        try:
+            await st.map_msg.edit(view=None)
+        except Exception:
+            pass
+        st.map_msg = None
+
+    chosen_map = st.map_pool[0] if st.map_pool else "Tuntematon kartta"
+    server_ip, server_status = await create_cs2_server(chosen_map)
+
+    message = f"**Karttadraft valmis!** Pelataan kartassa **{chosen_map}**.\n"
+    if server_ip:
+        message += f"CS2-serveri: `{server_ip}`\n"
+    else:
+        message += "CS2-serveriä ei saatu luotua automaattisesti.\n"
+    if server_status:
+        message += server_status
+
+    await interaction.followup.send(message, ephemeral=False)
+
+    drafted = set(st.team1 + st.team2)
+    st.queue = [u for u in st.queue if u not in drafted]
+    st.queue_joined_at = {
+        uid: joined_at
+        for uid, joined_at in st.queue_joined_at.items()
+        if uid in st.queue
+    }
+    st.map_draft_active = False
+    st.captains = None
+    st.team1.clear(); st.team2.clear(); st.pick_pool.clear()
+    st.pick_index = 0
+    st.number_by_uid.clear()
+    st.last_pick_prefix = None
+    st.last_map_prefix = None
+    st.map_pool.clear()
+    st.map_bans.clear()
+    st.map_ban_index = 0
+
+async def create_cs2_server(map_name: str) -> Tuple[Optional[str], str]:
+    if not CS2_SERVER_COMMAND:
+        if CS2_SERVER_IP:
+            return CS2_SERVER_IP, "⚠️ CS2_SERVER_COMMAND ei ole asetettu, näytetään konfiguroitu IP."
+        return None, "⚠️ CS2_SERVER_COMMAND ei ole asetettu."
+
+    command = CS2_SERVER_COMMAND.format(map=map_name)
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    output = stdout.decode().strip()
+    err = stderr.decode().strip()
+
+    if proc.returncode != 0:
+        status = f"⚠️ CS2-serverin käynnistys epäonnistui ({proc.returncode})."
+        if err:
+            status += f" {err}"
+        return CS2_SERVER_IP or None, status
+
+    ip = output or CS2_SERVER_IP or None
+    return ip, ""
 
 async def move_players_to_fixed_voice_channels(
     guild: discord.Guild,
@@ -1804,7 +1984,7 @@ async def add_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
     uid = interaction.user.id
-    if st.draft_active or st.readycheck_active:
+    if st.draft_active or st.readycheck_active or st.map_draft_active:
         return await interaction.response.send_message("Draft käynnissä tai readycheck päällä – ei uusia liittymisiä.", ephemeral=True)
     if uid in st.queue:
         return await interaction.response.send_message("Olet jo jonossa.", ephemeral=True)
@@ -1832,7 +2012,7 @@ async def rm_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
     uid = interaction.user.id
-    if uid in st.queue and not st.readycheck_active and not st.draft_active:
+    if uid in st.queue and not st.readycheck_active and not st.draft_active and not st.map_draft_active:
         st.queue.remove(uid)
         st.queue_joined_at.pop(uid, None)
         return await interaction.response.send_message("Poistuttu jonosta.")
@@ -1979,6 +2159,15 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
         return await interaction.response.send_message("Virheellinen numero tai pelaaja on jo valittu.", ephemeral=True)
 
     await handle_pick_selection(interaction, st, uid)
+
+@bot.tree.command(name="banmap", description="Kapteenin karttabanni (esim. /banmap Mirage)")
+@app_commands.describe(map_name="Kartta, jonka haluat bannata")
+async def banmap_cmd(interaction: discord.Interaction, map_name: str):
+    st = bot.get_state(interaction.guild_id)
+    match = next((m for m in st.map_pool if m.lower() == map_name.lower()), None)
+    if not match:
+        return await interaction.response.send_message("Karttaa ei löytynyt karttapoolista.", ephemeral=True)
+    await handle_map_ban_selection(interaction, st, match)
 
 @bot.tree.command(name="setwinner", description="Aseta pelin voittaja numerolla (1=team1, 2=team2; 0=tasan)")
 @app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")
@@ -2238,7 +2427,7 @@ async def send_head_to_head_summary(
 @bot.tree.command(name="dstatus", description="Näyttää jonon, valmiit ja draftin tilan")
 async def ds_cmd(interaction: discord.Interaction):
     st = bot.get_state(interaction.guild_id)
-    if not st.queue and not st.draft_active:
+    if not st.queue and not st.draft_active and not st.map_draft_active:
         await interaction.response.send_message("Jono on tyhjä.", ephemeral=True)
         return
 
@@ -2278,6 +2467,19 @@ async def ds_cmd(interaction: discord.Interaction):
             name=f"Tiimi 2 ({len(t2_names)})",
             value="\n".join(t2_names) if t2_names else "—",
             inline=True,
+        )
+
+    elif st.map_draft_active:
+        bans = [f"{team}: {map_name}" for team, map_name in st.map_bans]
+        embed.add_field(
+            name="Karttadraft käynnissä",
+            value="Bannit:\n" + ("\n".join(bans) if bans else "—"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Jäljellä olevat kartat",
+            value="\n".join(st.map_pool) if st.map_pool else "—",
+            inline=False,
         )
 
     else:
@@ -2462,9 +2664,11 @@ async def reset_cmd(interaction: discord.Interaction):
     if st.ready_task and not st.ready_task.done():
         st.ready_task.cancel()
     st.draft_active = False
+    st.map_draft_active = False
     st.captains = None
     st.last_pick_prefix = None
     st.team1.clear(); st.team2.clear(); st.pick_pool.clear(); st.pick_index = 0
+    st.map_pool.clear(); st.map_bans.clear(); st.map_ban_index = 0
     await interaction.response.send_message("Jono ja draft-tila nollattu.")
 
 @bot.tree.command(name="nocaptain", description="Estä bottia valitsemasta sinua kapteeniksi")

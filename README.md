@@ -10,11 +10,13 @@ A feature-rich Discord bot for organizing Counter-Strike draft matches with auto
 A simple Discord bot for organizing CS2 inhouse matches with:
 
 - Automated queue, readycheck, and captain draft flow
+- Map draft after team selection
 - Player stats tracking (wins, captain picks, first/last pick counts)
 - Pick turn breakdowns with average pick round stats
 - Elo ratings with leaderboards
 - Winrate comparisons between players
 - Optional automatic voice channel moves
+- Optional CS2 server start with competitive ruleset and server IP output
 - Opt-out controls for captain selection
 
 Please don't let this ruin your friendships too much. :3
@@ -51,6 +53,20 @@ AUTO_VOICE_CHANNELS = True         # Enable automatic voice channel moves
 EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 ```
 
+### Optional CS2 server settings
+
+Set environment variables to let the bot launch a CS2 server after the map draft:
+
+- `CS2_SERVER_COMMAND` - Shell command template for starting the server. Use `{map}` to insert the chosen map.
+- `CS2_SERVER_IP` - Fallback IP address to display if the command does not print an IP.
+
+Example:
+
+```bash
+export CS2_SERVER_COMMAND="./start_cs2_server.sh --map \"{map}\" --ruleset competitive"
+export CS2_SERVER_IP="203.0.113.42:27015"
+```
+
 ## Commands
 
 ### Player Commands
@@ -66,6 +82,7 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/elo [user]` | `!elo` | View Elo rating and ranking |
 | `/dstatus` | `!dstatus` | Check current queue/draft status |
 | `/pick <number>` | `!pick`, `!p` | Captain: Pick a player by number |
+| `/banmap <map>` | `!banmap` | Captain: Ban a map during map draft |
 | `/nocaptain` | `!nocaptain` | Opt out of being randomly selected as captain |
 | `/allowcaptain` | `!allowcaptain` | Re-allow captain selection |
 
@@ -109,10 +126,16 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 - Pick order: Team1 → Team2 → Team1 → Team2 → Team1 → Team2 → Team2
 - Each captain has 45 seconds per pick (auto-pick if timeout)
 - Last player automatically assigned to Team 1
+- Map draft begins after teams are locked in
+- Map pool: Ancient, Anubis, Dust II, Inferno, Mirage, Nuke, Overpass
+- Captains take turns banning maps until one remains
 
 ### 4. Game Time
 
 - Teams are displayed in an embed
+- Captains ban maps until one remains
+- Bot launches a CS2 server on the remaining map (if configured)
+- Server IP is posted in the channel
 - If enabled, players are automatically moved to team voice channels after 15 seconds
 - Game ID is generated for stat tracking
 

@@ -168,6 +168,11 @@ class DraftState:
     server_watch_task: Optional[asyncio.Task] = None
     live_cfg_sent: bool = False
     expected_steamids: List[str] = field(default_factory=list)
+    side_selection_active: bool = False
+    side_selection_team: Optional[str] = None
+    side_selection_msg: Optional[discord.Message] = None
+    team1_side: str = "CT"
+    team2_side: str = "T"
 
 
 # -----------------------------
@@ -1290,6 +1295,27 @@ class MapVetoView(discord.ui.View):
         for idx, map_name in enumerate(maps):
             self.add_item(MapVetoButton(map_name, row=idx // 5))
 
+class SideSelectButton(discord.ui.Button):
+    def __init__(self, side: str, row: int):
+        super().__init__(
+            style=discord.ButtonStyle.primary,
+            label=side,
+            row=row,
+            custom_id=f"side_select_{side}",
+        )
+        self.side = side
+
+    async def callback(self, interaction: discord.Interaction):
+        view = typing.cast("SideSelectView", self.view)
+        await handle_side_selection(interaction, view.state, self.side)
+
+class SideSelectView(discord.ui.View):
+    def __init__(self, state: DraftState):
+        super().__init__(timeout=None)
+        self.state = state
+        self.add_item(SideSelectButton("CT", row=0))
+        self.add_item(SideSelectButton("T", row=0))
+
 async def build_pick_view(interaction: discord.Interaction, st: DraftState) -> discord.ui.View:
     button_data = []
     for uid in st.pick_pool:
@@ -1340,6 +1366,22 @@ async def handle_veto_selection(interaction: discord.Interaction, st: DraftState
 
     await interaction.response.defer(thinking=False)
     await _apply_veto(interaction, st, map_name, is_autoban=False)
+
+async def handle_side_selection(interaction: discord.Interaction, st: DraftState, side: str) -> None:
+    if not st.side_selection_active or not st.side_selection_team:
+        return await interaction.response.send_message("Puolen valinta ei ole käynnissä.", ephemeral=True)
+    if side not in {"CT", "T"}:
+        return await interaction.response.send_message("Virheellinen puoli.", ephemeral=True)
+
+    expected_captain = st.captains[0] if st.side_selection_team == "team1" else st.captains[1]
+    if interaction.user.id != expected_captain:
+        return await interaction.response.send_message(
+            "Vain vuorossa oleva kapteeni voi valita puolen.",
+            ephemeral=True,
+        )
+
+    await interaction.response.defer(thinking=False)
+    await _apply_side_selection(interaction, st, side)
 
 async def announce_next_picker(interaction: discord.Interaction, st: DraftState, prefix: Optional[str] = None):
     if st.pick_index >= len(st.pick_order):
@@ -1653,6 +1695,56 @@ async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, sel
         return
 
     await interaction.followup.send(f"**Kartta valittu:** {selected_map}")
+    if st.veto_index > 0 and st.captains:
+        last_team = st.veto_order[st.veto_index - 1] if st.veto_order else None
+        chooser_team = "team1" if last_team == "team2" else "team2"
+        await start_side_selection(interaction, st, chooser_team)
+        return
+    await start_server_orchestration(interaction, st)
+
+async def start_side_selection(interaction: discord.Interaction, st: DraftState, chooser_team: str) -> None:
+    st.side_selection_active = True
+    st.side_selection_team = chooser_team
+    st.team1_side = "CT"
+    st.team2_side = "T"
+
+    captain = st.captains[0] if chooser_team == "team1" else st.captains[1]
+    team_label = "Team 1" if chooser_team == "team1" else "Team 2"
+    content = (
+        f"Puolen valinta: {mention(captain)} ({team_label})\n"
+        "Valitse puoli napista."
+    )
+    view = SideSelectView(st)
+    if st.side_selection_msg:
+        try:
+            st.side_selection_msg = await st.side_selection_msg.edit(content=content, view=view)
+        except Exception:
+            st.side_selection_msg = await interaction.followup.send(content, view=view, ephemeral=False)
+    else:
+        st.side_selection_msg = await interaction.followup.send(content, view=view, ephemeral=False)
+
+async def _apply_side_selection(interaction: discord.Interaction, st: DraftState, side: str) -> None:
+    chooser_team = st.side_selection_team
+    if chooser_team == "team1":
+        st.team1_side = side
+        st.team2_side = "T" if side == "CT" else "CT"
+    else:
+        st.team2_side = side
+        st.team1_side = "T" if side == "CT" else "CT"
+
+    st.side_selection_active = False
+    st.side_selection_team = None
+
+    if st.side_selection_msg:
+        try:
+            await st.side_selection_msg.edit(view=None)
+        except Exception:
+            pass
+        st.side_selection_msg = None
+
+    await interaction.followup.send(
+        f"Puoli valittu. Team 1: **{st.team1_side}**, Team 2: **{st.team2_side}**."
+    )
     await start_server_orchestration(interaction, st)
 
 
@@ -2054,14 +2146,16 @@ def _build_match_config(
     selected_map: str,
     team1_ids: List[str],
     team2_ids: List[str],
+    team1_side: str,
+    team2_side: str,
 ) -> Tuple[str, dict]:
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
     config = {
         "map": selected_map,
         "ruleset": "competitive",
-        "team1_side": "CT",
-        "team2_side": "T",
+        "team1_side": team1_side,
+        "team2_side": team2_side,
         "team1": team1_ids,
         "team2": team2_ids,
     }
@@ -2109,6 +2203,8 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         selected_map=st.selected_map,
         team1_ids=team1_steamids,
         team2_ids=team2_steamids,
+        team1_side=st.team1_side,
+        team2_side=st.team2_side,
     )
     config_path = os.path.join(CS2_MATCH_CONFIG_DIR, config_filename)
     try:
@@ -2492,6 +2588,16 @@ async def start_draft(interaction: discord.Interaction):
     st.veto_order = []
     st.veto_index = 0
     st.selected_map = None
+    st.side_selection_active = False
+    st.side_selection_team = None
+    if st.side_selection_msg:
+        try:
+            await st.side_selection_msg.edit(view=None)
+        except Exception:
+            pass
+    st.side_selection_msg = None
+    st.team1_side = "CT"
+    st.team2_side = "T"
     if st.server_watch_task and not st.server_watch_task.done():
         st.server_watch_task.cancel()
     st.server_watch_task = None
@@ -3073,6 +3179,16 @@ async def reset_cmd(interaction: discord.Interaction):
     st.veto_order = []
     st.veto_index = 0
     st.selected_map = None
+    st.side_selection_active = False
+    st.side_selection_team = None
+    if st.side_selection_msg:
+        try:
+            await st.side_selection_msg.edit(view=None)
+        except Exception:
+            pass
+    st.side_selection_msg = None
+    st.team1_side = "CT"
+    st.team2_side = "T"
     if st.server_watch_task and not st.server_watch_task.done():
         st.server_watch_task.cancel()
     st.server_watch_task = None

@@ -2121,7 +2121,8 @@ async def start_server_boot(interaction: discord.Interaction, st: DraftState) ->
         with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
             rcon.command("status")
         await interaction.followup.send("Serveri käynnistetään, drafti voi alkaa.")
-    except Exception:
+    except Exception as exc:
+        print(f"RCON yhteys epäonnistui: {exc}")
         await interaction.followup.send("Serveriin ei saatu yhteyttä, mutta drafti jatkuu.")
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):

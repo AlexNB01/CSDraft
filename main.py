@@ -2514,6 +2514,9 @@ def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, 
         conn = sqlite3.connect(CS2_MATCH_RESULTS_DB)
         conn.row_factory = sqlite3.Row
         tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        preferred_table = "matchzy_stats_maps"
+        if preferred_table in tables:
+            tables = [preferred_table]
         match_id_candidates = {"matchid", "matchid64", "gameid", "id"}
         winner_candidates = {"winner", "winnerteam"}
         score_pairs = [

@@ -2463,6 +2463,16 @@ def _pick_latest_row(
     return best_row
 
 def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
+    end_time_keys = ["endtime", "end_time", "end"]
+    for key in end_time_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if value in (None, ""):
+            return False
+        return True
+
     flag_keys = [
         "finished",
         "isfinished",

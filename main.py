@@ -2138,8 +2138,8 @@ def _build_match_config(
     guild_id: int,
     game_id: int,
     selected_map: str,
-    team1_ids: List[str],
-    team2_ids: List[str],
+    team1_players: Dict[str, str],
+    team2_players: Dict[str, str],
     team1_side: str,
     team2_side: str,
 ) -> Tuple[str, dict]:
@@ -2152,6 +2152,8 @@ def _build_match_config(
     ):
         config_format = "matchzy"
     if config_format == "legacy":
+        team1_ids = list(team1_players.keys())
+        team2_ids = list(team2_players.keys())
         config = {
             "map": selected_map,
             "ruleset": "competitive",
@@ -2169,12 +2171,12 @@ def _build_match_config(
             "side_type": "standard",
             "team1": {
                 "name": "Team 1",
-                "players": team1_ids,
+                "players": team1_players,
                 "side": team1_side,
             },
             "team2": {
                 "name": "Team 2",
-                "players": team2_ids,
+                "players": team2_players,
                 "side": team2_side,
             },
         }
@@ -2315,14 +2317,19 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
             return steam_map[uid]
         return f"{uid:017d}"
 
-    team1_steamids = [steamid_for(uid) for uid in st.team1]
-    team2_steamids = [steamid_for(uid) for uid in st.team2]
+    async def player_name(uid: int) -> str:
+        if uid in st.fake_users:
+            return f"test-{uid % 1000000}"
+        return await get_display_name(interaction, uid)
+
+    team1_players = {steamid_for(uid): await player_name(uid) for uid in st.team1}
+    team2_players = {steamid_for(uid): await player_name(uid) for uid in st.team2}
     config_filename, config_data = _build_match_config(
         guild_id=interaction.guild_id or 0,
         game_id=st.game_id,
         selected_map=st.selected_map,
-        team1_ids=team1_steamids,
-        team2_ids=team2_steamids,
+        team1_players=team1_players,
+        team2_players=team2_players,
         team1_side=st.team1_side,
         team2_side=st.team2_side,
     )

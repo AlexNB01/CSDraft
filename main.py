@@ -2163,21 +2163,20 @@ def _build_match_config(
             "team2": team2_ids,
         }
     else:
+        map_side = "team1_ct" if team1_side.upper() == "CT" else "team1_t"
         config = {
             "matchid": str(game_id),
             "num_maps": 1,
             "maplist": [selected_map],
+            "map_sides": [map_side],
             "skip_veto": True,
-            "side_type": "standard",
             "team1": {
                 "name": "Team 1",
                 "players": team1_players,
-                "side": team1_side,
             },
             "team2": {
                 "name": "Team 2",
                 "players": team2_players,
-                "side": team2_side,
             },
         }
     extra = _load_match_config_extras()

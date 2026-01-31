@@ -11,7 +11,6 @@ import typing
 import re
 import urllib.request
 import urllib.parse
-import subprocess
 import sqlite3
 from types import SimpleNamespace
 from collections import Counter
@@ -48,11 +47,6 @@ CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
-CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
-CS2_SERVER_START_SCRIPT = os.getenv("CS2_SERVER_START_SCRIPT", "")
-CS2_SERVER_START_WORKDIR = os.getenv("CS2_SERVER_START_WORKDIR", "")
-CS2_SERVER_START_WAIT_SECONDS = int(os.getenv("CS2_SERVER_START_WAIT_SECONDS", "12"))
-CS2_SERVER_STOP_CMD = os.getenv("CS2_SERVER_STOP_CMD", "quit")
 CS2_MATCH_RESULTS_DIR = os.getenv("CS2_MATCH_RESULTS_DIR", "")
 CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
 CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
@@ -2244,23 +2238,6 @@ def _write_match_config(path: str, data: dict) -> None:
         target_path = os.path.join(CS2_MATCH_CONFIG_TARGET_DIR, os.path.basename(path))
         shutil.copy2(path, target_path)
 
-def _start_server_process_if_configured() -> None:
-    if not CS2_SERVER_START_SCRIPT:
-        return
-    try:
-        if CS2_SERVER_START_SCRIPT.lower().endswith((".bat", ".cmd")):
-            cmd = ["cmd.exe", "/c", CS2_SERVER_START_SCRIPT]
-        else:
-            cmd = [CS2_SERVER_START_SCRIPT]
-        subprocess.Popen(
-            cmd,
-            cwd=CS2_SERVER_START_WORKDIR or None,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as exc:
-        print(f"Serverin start-scriptin käynnistys epäonnistui: {exc}")
-
 def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
     last_response = ""
     for cmd in _match_start_cmds():
@@ -2644,15 +2621,6 @@ def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[in
         return result
     return _scan_match_results_dir(game_id, started_at_ts)
 
-async def shutdown_server() -> None:
-    if not CS2_RCON_PASSWORD or not CS2_SERVER_STOP_CMD.strip():
-        return
-    try:
-        with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
-            rcon.command(CS2_SERVER_STOP_CMD.strip())
-    except Exception as exc:
-        print(f"Serverin sammutus epäonnistui: {exc}")
-
 async def watch_match_results(
     interaction: discord.Interaction,
     st: DraftState,
@@ -2701,7 +2669,6 @@ async def watch_match_results(
                         msg=countdown_msg,
                     )
                 )
-            await shutdown_server()
             break
     except asyncio.CancelledError:
         pass
@@ -2783,20 +2750,6 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         f"Puolet: Team 1 **{st.team1_side}** / Team 2 **{st.team2_side}**"
         f"{connect_line}"
     )
-async def start_server_boot(interaction: discord.Interaction, st: DraftState) -> None:
-    if not CS2_RCON_PASSWORD:
-        await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
-        return
-    _start_server_process_if_configured()
-    if CS2_SERVER_START_SCRIPT and CS2_SERVER_START_WAIT_SECONDS > 0:
-        await asyncio.sleep(CS2_SERVER_START_WAIT_SECONDS)
-    try:
-        with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
-            rcon.command("status")
-            rcon.command(CS2_COMP_CFG_CMD)
-    except Exception as exc:
-        print(f"RCON yhteys epäonnistui: {exc}")
-        return
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
     if st.rc_timer_task and not st.rc_timer_task.done():
@@ -3199,7 +3152,6 @@ async def start_draft(interaction: discord.Interaction):
 
 
     await interaction.followup.send(header, ephemeral=False)
-    asyncio.create_task(start_server_boot(interaction, st))
     await announce_next_picker(interaction, st)
 
 @bot.tree.command(name="pick", description="Kapteenin valintakomento (esim. /pick 3)")
@@ -3281,8 +3233,6 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
         if st.result_task and not st.result_task.done():
             st.result_task.cancel()
         st.result_task = None
-        await shutdown_server()
-
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 

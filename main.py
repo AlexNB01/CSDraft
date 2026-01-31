@@ -12,6 +12,7 @@ import re
 import urllib.request
 import urllib.parse
 import subprocess
+import sqlite3
 from types import SimpleNamespace
 from collections import Counter
 from dataclasses import dataclass, field
@@ -53,6 +54,7 @@ CS2_SERVER_START_WORKDIR = os.getenv("CS2_SERVER_START_WORKDIR", "")
 CS2_SERVER_START_WAIT_SECONDS = int(os.getenv("CS2_SERVER_START_WAIT_SECONDS", "12"))
 CS2_SERVER_STOP_CMD = os.getenv("CS2_SERVER_STOP_CMD", "quit")
 CS2_MATCH_RESULTS_DIR = os.getenv("CS2_MATCH_RESULTS_DIR", "")
+CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
 CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
 
 # ---- UI: värit ja footer ----
@@ -2384,7 +2386,208 @@ def _extract_winner(payload: dict) -> Optional[int]:
         return _extract_winner(match)
     return None
 
-def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
+def _parse_winner_value(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in {"team1", "team_1", "1"}:
+            return 1
+        if lowered in {"team2", "team_2", "2"}:
+            return 2
+        if lowered in {"draw", "tie", "0"}:
+            return 0
+    try:
+        winner = int(value)
+    except (TypeError, ValueError):
+        return None
+    if winner in (0, 1, 2):
+        return winner
+    return None
+
+def _normalize_identifier(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+def _pick_latest_row(
+    rows: List[sqlite3.Row],
+    column_map: Dict[str, str],
+    started_at_ts: float,
+) -> Optional[sqlite3.Row]:
+    timestamp_keys = [
+        "finishedat",
+        "finished_at",
+        "endedat",
+        "ended_at",
+        "completedat",
+        "completed_at",
+        "updatedat",
+        "updated_at",
+        "ended",
+        "endtime",
+        "end_time",
+        "createdat",
+        "created_at",
+        "startedat",
+        "started_at",
+    ]
+    timestamp_cols = [column_map[key] for key in timestamp_keys if key in column_map]
+    best_row = None
+    best_ts = None
+
+    for row in rows:
+        row_ts = None
+        for col in timestamp_cols:
+            value = row[col]
+            if value is None:
+                continue
+            if isinstance(value, (int, float)):
+                row_ts = float(value)
+            elif isinstance(value, str):
+                try:
+                    parsed = datetime.datetime.fromisoformat(value)
+                    row_ts = parsed.timestamp()
+                except ValueError:
+                    continue
+            if row_ts is not None:
+                break
+        if row_ts is None:
+            continue
+        if row_ts < started_at_ts:
+            continue
+        if best_ts is None or row_ts > best_ts:
+            best_ts = row_ts
+            best_row = row
+
+    if best_row is None and rows:
+        return rows[-1]
+    return best_row
+
+def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
+    flag_keys = [
+        "finished",
+        "isfinished",
+        "is_finished",
+        "completed",
+        "iscompleted",
+        "is_completed",
+        "ended",
+        "isended",
+        "is_ended",
+    ]
+    for key in flag_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "finished", "completed", "ended"}
+    status_keys = ["status", "state", "matchstate", "match_state"]
+    for key in status_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if isinstance(value, str):
+            lowered = value.lower()
+            return lowered in {"finished", "completed", "ended", "done"}
+    return True
+
+def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
+    if not CS2_MATCH_RESULTS_DB:
+        return None
+    if not os.path.isfile(CS2_MATCH_RESULTS_DB):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(CS2_MATCH_RESULTS_DB)
+        conn.row_factory = sqlite3.Row
+        tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        match_id_candidates = {"matchid", "matchid64", "gameid", "id"}
+        winner_candidates = {"winner", "winnerteam"}
+        score_pairs = [
+            ("team1score", "team2score"),
+            ("scoreteam1", "scoreteam2"),
+        ]
+
+        for table in tables:
+            try:
+                columns = [
+                    row["name"]
+                    for row in conn.execute(f"PRAGMA table_info(\"{table}\")")
+                ]
+            except sqlite3.Error:
+                continue
+            column_map = {_normalize_identifier(name): name for name in columns}
+
+            match_col = None
+            for candidate in match_id_candidates:
+                if candidate in column_map:
+                    match_col = column_map[candidate]
+                    break
+            if not match_col:
+                continue
+
+            winner_col = None
+            for candidate in winner_candidates:
+                if candidate in column_map:
+                    winner_col = column_map[candidate]
+                    break
+
+            score_cols = None
+            for left, right in score_pairs:
+                if left in column_map and right in column_map:
+                    score_cols = (column_map[left], column_map[right])
+                    break
+
+            if not winner_col and not score_cols:
+                continue
+
+            sql = f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ?"
+            try:
+                rows = list(conn.execute(sql, (str(game_id),)))
+                if not rows:
+                    rows = list(conn.execute(sql, (game_id,)))
+            except sqlite3.Error:
+                continue
+
+            if not rows:
+                continue
+            row = _pick_latest_row(rows, column_map, started_at_ts)
+            if row is None:
+                continue
+            if not _row_is_finished(row, column_map):
+                continue
+
+            winner = _parse_winner_value(row[winner_col]) if winner_col else None
+            score_pair = None
+            if score_cols:
+                try:
+                    score_pair = (int(row[score_cols[0]]), int(row[score_cols[1]]))
+                except (TypeError, ValueError):
+                    score_pair = None
+
+            if winner is None and score_pair:
+                if score_pair[0] == score_pair[1]:
+                    winner = 0
+                else:
+                    winner = 1 if score_pair[0] > score_pair[1] else 2
+
+            if winner is None:
+                continue
+            return winner, score_pair
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return None
+
+def _scan_match_results_dir(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
     if not CS2_MATCH_RESULTS_DIR:
         return None
     if not os.path.isdir(CS2_MATCH_RESULTS_DIR):
@@ -2421,6 +2624,12 @@ def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[in
             continue
         return winner, score_pair
     return None
+
+def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
+    result = _scan_matchzy_db(game_id, started_at_ts)
+    if result:
+        return result
+    return _scan_match_results_dir(game_id, started_at_ts)
 
 async def shutdown_server() -> None:
     if not CS2_RCON_PASSWORD or not CS2_SERVER_STOP_CMD.strip():

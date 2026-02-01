@@ -66,8 +66,7 @@ CS2_MATCH_CONFIG_RCON_DIR=addons/counterstrikesharp/plugins/MatchZy/match_config
 CS2_MATCH_CONFIG_URL_BASE=http://127.0.0.1:8080/match_configs
 CS2_MATCH_PLUGIN_START_CMD=matchzy_loadmatch
 CS2_MATCH_PLUGIN_START_CMDS=matchzy_loadmatch
-CS2_SERVER_START_SCRIPT=C:\CSServer\start.bat
-CS2_SERVER_START_WORKDIR=C:\CSServer
+CS2_MATCH_RESULTS_DB=C:\CSServer\server\game\csgo\addons\counterstrikesharp\plugins\MatchZy\matchzy.db
 ```
 
 - `CS2_MATCH_CONFIG_TARGET_DIR` copies the generated JSON into your MatchZy config folder.
@@ -75,7 +74,7 @@ CS2_SERVER_START_WORKDIR=C:\CSServer
 - `CS2_MATCH_CONFIG_URL_BASE` is required for `matchzy_loadmatch_url` and must be a valid `http(s)` URL that serves the generated JSON files. You can also use `{filename}` as a placeholder (e.g. `http://127.0.0.1:8080/match_configs/{filename}`).
 - If `CS2_MATCH_CONFIG_RCON_DIR` is empty and the target path contains `csgo/`, the bot will auto-derive the relative RCON path.
 - `CS2_MATCH_PLUGIN_START_CMDS` allows the bot to try multiple MatchZy commands until one works (comma-separated).
-- `CS2_SERVER_START_SCRIPT` starts the CS server automatically (optional).
+- `CS2_MATCH_RESULTS_DB` points at MatchZy's SQLite database so the bot can detect finished matches.
 
 ## Commands
 

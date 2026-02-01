@@ -4,13 +4,15 @@ import random
 import json
 import shutil
 import datetime
+import time
 import socket
 import struct
 import typing
 import re
 import urllib.request
 import urllib.parse
-import subprocess
+import sqlite3
+from types import SimpleNamespace
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -45,10 +47,9 @@ CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
-CS2_COMP_CFG_CMD = os.getenv("CS2_COMP_CFG_CMD", "exec comp.cfg")
-CS2_SERVER_START_SCRIPT = os.getenv("CS2_SERVER_START_SCRIPT", "")
-CS2_SERVER_START_WORKDIR = os.getenv("CS2_SERVER_START_WORKDIR", "")
-CS2_SERVER_START_WAIT_SECONDS = int(os.getenv("CS2_SERVER_START_WAIT_SECONDS", "12"))
+CS2_MATCH_RESULTS_DIR = os.getenv("CS2_MATCH_RESULTS_DIR", "")
+CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
+CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -179,6 +180,7 @@ class DraftState:
     side_selection_msg: Optional[discord.Message] = None
     team1_side: str = "CT"
     team2_side: str = "T"
+    result_task: Optional[asyncio.Task] = None
 
 
 # -----------------------------
@@ -201,6 +203,7 @@ CREATE TABLE IF NOT EXISTS games (
   guild_id INTEGER NOT NULL,
   team1 TEXT NOT NULL,  -- JSON array of user_ids
   team2 TEXT NOT NULL,  -- JSON array of user_ids
+  map TEXT,
   winner INTEGER,       -- 1 or 2, NULL if unset
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -249,6 +252,7 @@ class DB:
             ratings_has_rd = await column_exists("ratings", "rd")
             history_has_pre_rd = await column_exists("rating_history", "pre_rd")
             history_has_post_rd = await column_exists("rating_history", "post_rd")
+            games_has_map = await column_exists("games", "map")
 
             if ratings_has_rd:
                 await db.execute(
@@ -294,6 +298,11 @@ class DB:
                 await db.execute("ALTER TABLE players ADD COLUMN captain_wins INTEGER NOT NULL DEFAULT 0")
             except aiosqlite.OperationalError:
                 pass
+            if not games_has_map:
+                try:
+                    await db.execute("ALTER TABLE games ADD COLUMN map TEXT")
+                except aiosqlite.OperationalError:
+                    pass
             await db.commit()
 
     async def ensure_player(self, user_id: int):
@@ -649,6 +658,20 @@ class DB:
                 )
                 await db.commit()
                 return cur.lastrowid
+
+    async def set_game_map(self, game_id: int, map_name: str) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("UPDATE games SET map=? WHERE id=?", (map_name, game_id))
+                await db.commit()
+
+    async def get_map_counts(self) -> Dict[str, int]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT map, COUNT(*) FROM games WHERE map IS NOT NULL AND map != '' GROUP BY map"
+            )
+            rows = await cur.fetchall()
+        return {str(map_name): int(count) for map_name, count in rows}
 
     async def set_winner(self, game_id: int, winner_team: int, overwrite: bool = False) -> Tuple[List[int], List[int]]:
         if winner_team not in (1, 2):
@@ -1688,6 +1711,9 @@ async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, sel
         await interaction.followup.send("Karttaveto epäonnistui: karttaa ei löytynyt.")
         return
 
+    if st.game_id:
+        await bot.db.set_game_map(st.game_id, selected_map)
+
     await interaction.followup.send(f"**Kartta valittu:** {selected_map}")
     if st.veto_index > 0 and st.captains:
         last_team = st.veto_order[st.veto_index - 1] if st.veto_order else None
@@ -2212,23 +2238,6 @@ def _write_match_config(path: str, data: dict) -> None:
         target_path = os.path.join(CS2_MATCH_CONFIG_TARGET_DIR, os.path.basename(path))
         shutil.copy2(path, target_path)
 
-def _start_server_process_if_configured() -> None:
-    if not CS2_SERVER_START_SCRIPT:
-        return
-    try:
-        if CS2_SERVER_START_SCRIPT.lower().endswith((".bat", ".cmd")):
-            cmd = ["cmd.exe", "/c", CS2_SERVER_START_SCRIPT]
-        else:
-            cmd = [CS2_SERVER_START_SCRIPT]
-        subprocess.Popen(
-            cmd,
-            cwd=CS2_SERVER_START_WORKDIR or None,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as exc:
-        print(f"Serverin start-scriptin käynnistys epäonnistui: {exc}")
-
 def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
     last_response = ""
     for cmd in _match_start_cmds():
@@ -2288,6 +2297,386 @@ def _resolve_matchzy_rcon_arg(cmd: str, config_filename: str) -> str:
         return url
     return _resolve_matchzy_rcon_path(config_filename)
 
+def _extract_match_id(payload: dict) -> Optional[str]:
+    for key in ("matchid", "match_id", "matchId", "id"):
+        if key in payload:
+            return str(payload[key])
+    match = payload.get("match")
+    if isinstance(match, dict):
+        for key in ("matchid", "match_id", "matchId", "id"):
+            if key in match:
+                return str(match[key])
+    return None
+
+def _extract_score_pair(payload: dict) -> Optional[Tuple[int, int]]:
+    for key1, key2 in (
+        ("team1_score", "team2_score"),
+        ("score_team1", "score_team2"),
+        ("team1Score", "team2Score"),
+        ("scoreTeam1", "scoreTeam2"),
+    ):
+        if key1 in payload and key2 in payload:
+            try:
+                return int(payload[key1]), int(payload[key2])
+            except (TypeError, ValueError):
+                return None
+    team1 = payload.get("team1")
+    team2 = payload.get("team2")
+    if isinstance(team1, dict) and isinstance(team2, dict):
+        def extract_team_score(team: dict) -> Optional[int]:
+            for key in ("score", "map_score", "series_score", "total_score"):
+                if key in team:
+                    try:
+                        return int(team[key])
+                    except (TypeError, ValueError):
+                        return None
+            return None
+        score1 = extract_team_score(team1)
+        score2 = extract_team_score(team2)
+        if score1 is not None and score2 is not None:
+            return score1, score2
+    match = payload.get("match")
+    if isinstance(match, dict):
+        return _extract_score_pair(match)
+    return None
+
+def _extract_winner(payload: dict) -> Optional[int]:
+    for key in ("winner", "winner_team", "winnerTeam"):
+        if key in payload:
+            value = payload[key]
+            if isinstance(value, str):
+                lowered = value.lower()
+                if lowered in {"team1", "team_1", "1"}:
+                    return 1
+                if lowered in {"team2", "team_2", "2"}:
+                    return 2
+                if lowered in {"draw", "tie"}:
+                    return 0
+            try:
+                winner = int(value)
+            except (TypeError, ValueError):
+                continue
+            if winner in (0, 1, 2):
+                return winner
+    match = payload.get("match")
+    if isinstance(match, dict):
+        return _extract_winner(match)
+    return None
+
+def _parse_winner_value(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in {"team1", "team_1", "1"}:
+            return 1
+        if lowered in {"team2", "team_2", "2"}:
+            return 2
+        if lowered in {"draw", "tie", "0"}:
+            return 0
+    try:
+        winner = int(value)
+    except (TypeError, ValueError):
+        return None
+    if winner in (0, 1, 2):
+        return winner
+    return None
+
+def _normalize_identifier(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+def _pick_latest_row(
+    rows: List[sqlite3.Row],
+    column_map: Dict[str, str],
+    started_at_ts: float,
+) -> Optional[sqlite3.Row]:
+    timestamp_keys = [
+        "finishedat",
+        "finished_at",
+        "endedat",
+        "ended_at",
+        "completedat",
+        "completed_at",
+        "updatedat",
+        "updated_at",
+        "ended",
+        "endtime",
+        "end_time",
+        "createdat",
+        "created_at",
+        "startedat",
+        "started_at",
+    ]
+    timestamp_cols = [column_map[key] for key in timestamp_keys if key in column_map]
+    best_row = None
+    best_ts = None
+
+    for row in rows:
+        row_ts = None
+        for col in timestamp_cols:
+            value = row[col]
+            if value is None:
+                continue
+            if isinstance(value, (int, float)):
+                row_ts = float(value)
+            elif isinstance(value, str):
+                try:
+                    parsed = datetime.datetime.fromisoformat(value)
+                    row_ts = parsed.timestamp()
+                except ValueError:
+                    continue
+            if row_ts is not None:
+                break
+        if row_ts is None:
+            continue
+        if row_ts < started_at_ts:
+            continue
+        if best_ts is None or row_ts > best_ts:
+            best_ts = row_ts
+            best_row = row
+
+    if best_row is None and rows:
+        return rows[-1]
+    return best_row
+
+def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
+    end_time_keys = ["endtime", "end_time", "end"]
+    for key in end_time_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if value in (None, ""):
+            return False
+        return True
+
+    flag_keys = [
+        "finished",
+        "isfinished",
+        "is_finished",
+        "completed",
+        "iscompleted",
+        "is_completed",
+        "ended",
+        "isended",
+        "is_ended",
+    ]
+    for key in flag_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "finished", "completed", "ended"}
+    status_keys = ["status", "state", "matchstate", "match_state"]
+    for key in status_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if isinstance(value, str):
+            lowered = value.lower()
+            return lowered in {"finished", "completed", "ended", "done"}
+    return True
+
+def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
+    if not CS2_MATCH_RESULTS_DB:
+        return None
+    if not os.path.isfile(CS2_MATCH_RESULTS_DB):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(CS2_MATCH_RESULTS_DB)
+        conn.row_factory = sqlite3.Row
+        tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        preferred_table = "matchzy_stats_maps"
+        if preferred_table in tables:
+            tables = [preferred_table]
+        match_id_candidates = {"matchid", "matchid64", "gameid", "id"}
+        winner_candidates = {"winner", "winnerteam"}
+        score_pairs = [
+            ("team1score", "team2score"),
+            ("scoreteam1", "scoreteam2"),
+        ]
+
+        for table in tables:
+            try:
+                columns = [
+                    row["name"]
+                    for row in conn.execute(f"PRAGMA table_info(\"{table}\")")
+                ]
+            except sqlite3.Error:
+                continue
+            column_map = {_normalize_identifier(name): name for name in columns}
+
+            match_col = None
+            for candidate in match_id_candidates:
+                if candidate in column_map:
+                    match_col = column_map[candidate]
+                    break
+            if not match_col:
+                continue
+
+            winner_col = None
+            for candidate in winner_candidates:
+                if candidate in column_map:
+                    winner_col = column_map[candidate]
+                    break
+
+            score_cols = None
+            for left, right in score_pairs:
+                if left in column_map and right in column_map:
+                    score_cols = (column_map[left], column_map[right])
+                    break
+
+            if not winner_col and not score_cols:
+                continue
+
+            sql = f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ?"
+            try:
+                rows = list(conn.execute(sql, (str(game_id),)))
+                if not rows:
+                    rows = list(conn.execute(sql, (game_id,)))
+            except sqlite3.Error:
+                continue
+
+            if not rows:
+                continue
+            row = _pick_latest_row(rows, column_map, started_at_ts)
+            if row is None:
+                continue
+            if not _row_is_finished(row, column_map):
+                continue
+
+            winner = _parse_winner_value(row[winner_col]) if winner_col else None
+            score_pair = None
+            if score_cols:
+                try:
+                    score_pair = (int(row[score_cols[0]]), int(row[score_cols[1]]))
+                except (TypeError, ValueError):
+                    score_pair = None
+
+            if winner is None and score_pair:
+                if score_pair[0] == score_pair[1]:
+                    winner = 0
+                else:
+                    winner = 1 if score_pair[0] > score_pair[1] else 2
+
+            if winner is None:
+                continue
+            return winner, score_pair
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return None
+
+def _scan_match_results_dir(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
+    if not CS2_MATCH_RESULTS_DIR:
+        return None
+    if not os.path.isdir(CS2_MATCH_RESULTS_DIR):
+        return None
+    for entry in os.scandir(CS2_MATCH_RESULTS_DIR):
+        if not entry.is_file() or not entry.name.endswith(".json"):
+            continue
+        try:
+            if entry.stat().st_mtime < started_at_ts:
+                continue
+        except FileNotFoundError:
+            continue
+        try:
+            with open(entry.path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        match_id = _extract_match_id(payload)
+        if match_id and match_id != str(game_id):
+            continue
+        if not match_id and str(game_id) not in entry.name:
+            continue
+        score_pair = _extract_score_pair(payload)
+        winner = _extract_winner(payload)
+        if winner is None and score_pair:
+            score1, score2 = score_pair
+            if score1 == score2:
+                winner = 0
+            else:
+                winner = 1 if score1 > score2 else 2
+        if winner is None:
+            continue
+        return winner, score_pair
+    return None
+
+def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
+    result = _scan_matchzy_db(game_id, started_at_ts)
+    if result:
+        return result
+    return _scan_match_results_dir(game_id, started_at_ts)
+
+async def watch_match_results(
+    interaction: discord.Interaction,
+    st: DraftState,
+    game_id: int,
+    started_at_ts: float,
+) -> None:
+    try:
+        poll_seconds = max(5, CS2_MATCH_RESULTS_POLL_SECONDS)
+        deadline = asyncio.get_running_loop().time() + 12 * 60 * 60
+        while True:
+            await asyncio.sleep(poll_seconds)
+            if asyncio.get_running_loop().time() > deadline:
+                break
+            game = await bot.db.get_game(game_id)
+            if not game or game.get("winner") is not None:
+                break
+            result = await asyncio.to_thread(_scan_match_results, game_id, started_at_ts)
+            if not result:
+                continue
+            winner, score_pair = result
+            try:
+                if winner == 0:
+                    team1, team2 = await bot.db.set_draw(game_id)
+                    outcome_text = "Tasapeli"
+                else:
+                    team1, team2 = await bot.db.set_winner(game_id, winner)
+                    outcome_text = f"Voittaja Team {winner}"
+            except ValueError:
+                break
+            score_text = ""
+            if score_pair:
+                score_text = f" ({score_pair[0]}–{score_pair[1]})"
+            if interaction.channel:
+                await interaction.channel.send(
+                    f"Peli `{game_id}` päättyi. {outcome_text}{score_text}."
+                )
+                all_players = team1 + team2
+                countdown_msg = await interaction.channel.send(
+                    "Pelaajat siirretään aulaan **15s** kuluttua…"
+                )
+                shim = SimpleNamespace(guild=interaction.guild, channel=interaction.channel)
+                asyncio.create_task(
+                    lobby_move_countdown(
+                        shim,
+                        all_players=all_players,
+                        msg=countdown_msg,
+                    )
+                )
+            break
+    except asyncio.CancelledError:
+        pass
+    finally:
+        current = asyncio.current_task()
+        if st.result_task is current:
+            st.result_task = None
+
 async def start_server_orchestration(interaction: discord.Interaction, st: DraftState):
     if not st.team1 or not st.team2 or not st.selected_map:
         await interaction.followup.send("Peliä ei löydy tai karttaa ei ole valittu.")
@@ -2303,7 +2692,7 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         missing_mentions = ", ".join(mention(uid) for uid in missing)
         await interaction.followup.send(
             f"Näiltä puuttuu SteamID-linkki: {missing_mentions}\n"
-            f"Linkkaa komennolla **!link <steamid64>**."
+            f"Linkkaa komennolla **/link <steamid64>** tai **!link <steamid64>**."
         )
         return
 
@@ -2347,26 +2736,20 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
         await interaction.followup.send(f"RCON epäonnistui: {exc}")
         return
 
+    if st.result_task and not st.result_task.done():
+        st.result_task.cancel()
+    if CS2_MATCH_RESULTS_DIR and st.game_id:
+        started_at_ts = time.time()
+        st.result_task = asyncio.create_task(
+            watch_match_results(interaction, st, st.game_id, started_at_ts)
+        )
+
     connect_line = f"\nYhdistä: `{CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
     await interaction.followup.send(
         f"Kartta: **{st.selected_map}**\n"
         f"Puolet: Team 1 **{st.team1_side}** / Team 2 **{st.team2_side}**"
         f"{connect_line}"
     )
-async def start_server_boot(interaction: discord.Interaction, st: DraftState) -> None:
-    if not CS2_RCON_PASSWORD:
-        await interaction.followup.send("CS2 RCON salasana puuttuu (CS2_RCON_PASSWORD).")
-        return
-    _start_server_process_if_configured()
-    if CS2_SERVER_START_SCRIPT and CS2_SERVER_START_WAIT_SECONDS > 0:
-        await asyncio.sleep(CS2_SERVER_START_WAIT_SECONDS)
-    try:
-        with SourceRCON(CS2_RCON_HOST, CS2_RCON_PORT, CS2_RCON_PASSWORD) as rcon:
-            rcon.command("status")
-            rcon.command(CS2_COMP_CFG_CMD)
-    except Exception as exc:
-        print(f"RCON yhteys epäonnistui: {exc}")
-        await interaction.followup.send("Serveriin ei saatu yhteyttä, mutta drafti jatkuu.")
 
 async def start_ready_timer(interaction: discord.Interaction, st: DraftState):
     if st.rc_timer_task and not st.rc_timer_task.done():
@@ -2567,6 +2950,12 @@ async def add_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Draft käynnissä tai readycheck päällä – ei uusia liittymisiä.", ephemeral=True)
     if uid in st.queue:
         return await interaction.response.send_message("Olet jo jonossa.", ephemeral=True)
+    steamid64 = await bot.db.get_steamid(uid)
+    if not steamid64:
+        return await interaction.response.send_message(
+            "Et ole linkannut SteamID:tä. Lisää se komennolla **/link <steamid64>** tai **!link <steamid64>**.",
+            ephemeral=True,
+        )
     st.queue.append(uid)
     st.queue_joined_at[uid] = datetime.datetime.now(datetime.timezone.utc)
     await interaction.response.send_message(f"Lisätty jonoon. Pelaajia jonossa: {len(st.queue)}/{QUEUE_SIZE}")
@@ -2596,6 +2985,29 @@ async def rm_cmd(interaction: discord.Interaction):
         st.queue_joined_at.pop(uid, None)
         return await interaction.response.send_message("Poistuttu jonosta.")
     return await interaction.response.send_message("Et ole jonossa tai poistuminen ei juuri nyt onnistu.", ephemeral=True)
+
+@bot.tree.command(name="link", description="Linkkaa SteamID64 (ylläpito voi linkata muille)")
+@app_commands.describe(steamid64="SteamID64 tai Steam-profiililinkki", user="(Ylläpito) Käyttäjä, jolle linkataan")
+async def link_cmd(interaction: discord.Interaction, steamid64: str, user: Optional[discord.User] = None):
+    target = user or interaction.user
+    if user and not interaction.user.guild_permissions.manage_guild:
+        return await interaction.response.send_message(
+            "Vain ylläpito voi linkata SteamID:n toiselle käyttäjälle.",
+            ephemeral=True,
+        )
+    raw = steamid64.strip()
+    resolved = extract_steamid64(raw)
+    if not resolved and "steamcommunity.com/id/" in raw:
+        resolved = resolve_vanity_steamid64(raw)
+    if not resolved:
+        return await interaction.response.send_message("Virheellinen SteamID64 tai profiililinkki.", ephemeral=True)
+    if await bot.db.is_steamid_taken(resolved, except_user_id=target.id):
+        return await interaction.response.send_message("Tuo SteamID on jo linkattu toiselle.", ephemeral=True)
+    await bot.db.upsert_steam_link(target.id, resolved)
+    if target.id == interaction.user.id:
+        await interaction.response.send_message("SteamID linkattu.")
+    else:
+        await interaction.response.send_message(f"SteamID linkattu käyttäjälle {target.mention}.")
 
 @bot.tree.command(name="r", description="Merkitse itsesi valmiiksi (readycheck)")
 async def r_cmd(interaction: discord.Interaction):
@@ -2740,7 +3152,6 @@ async def start_draft(interaction: discord.Interaction):
 
 
     await interaction.followup.send(header, ephemeral=False)
-    await start_server_boot(interaction, st)
     await announce_next_picker(interaction, st)
 
 @bot.tree.command(name="pick", description="Kapteenin valintakomento (esim. /pick 3)")
@@ -2761,6 +3172,7 @@ async def pick_cmd(interaction: discord.Interaction, number: int):
 @app_commands.describe(game_id="Pelin ID", winner="Voittanut tiimi (1, 2) tai 0=tasan")
 async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: int):
     overwrite = (interaction.user.id == 97687348396953600)
+    st = bot.get_state(interaction.guild_id)
 
     try:
         if winner == 0:
@@ -2818,7 +3230,9 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
                 msg=countdown_msg,
             )
         )
-
+        if st.result_task and not st.result_task.done():
+            st.result_task.cancel()
+        st.result_task = None
     except ValueError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 
@@ -3165,6 +3579,20 @@ async def winners_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="maps", description="Näytä karttojen peluumäärät")
+async def maps_cmd(interaction: discord.Interaction):
+    counts = await bot.db.get_map_counts()
+    lines = [f"{map_name}: {counts.get(map_name, 0)}" for map_name in MAP_POOL]
+    extra_maps = sorted(name for name in counts.keys() if name not in MAP_POOL)
+    lines.extend(f"{map_name}: {counts.get(map_name, 0)}" for map_name in extra_maps)
+    embed = discord.Embed(
+        title="Karttojen peluumäärät",
+        color=EMBED_COLOR_PRIMARY,
+        description="\n".join(lines) if lines else "Ei dataa vielä.",
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="captains", description="Eniten kapteenina toimineet (Top 10)")
 async def captains_cmd(interaction: discord.Interaction):
     async with aiosqlite.connect(bot.db.path) as db:
@@ -3238,6 +3666,9 @@ async def reset_cmd(interaction: discord.Interaction):
     st.queue.clear(); st.queue_joined_at.clear(); st.ready_users.clear(); st.readycheck_active = False
     if st.ready_task and not st.ready_task.done():
         st.ready_task.cancel()
+    if st.result_task and not st.result_task.done():
+        st.result_task.cancel()
+    st.result_task = None
     st.draft_active = False
     st.captains = None
     st.last_pick_prefix = None
@@ -3328,17 +3759,38 @@ async def filltest_cmd(interaction: discord.Interaction):
         st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
 
 @bot.command(name="link")
-async def link_bang(ctx: commands.Context, steamid64: str):
-    raw = steamid64.strip()
-    resolved = extract_steamid64(raw)
+async def link_bang(ctx: commands.Context, *args: str):
+    if not args:
+        return await ctx.reply("Käyttö: `!link <steamid64>` tai `!link @user <steamid64>`")
+
+    target = ctx.author
+    raw = None
+    if len(args) == 1:
+        raw = args[0]
+    else:
+        try:
+            target = await commands.MemberConverter().convert(ctx, args[0])
+        except commands.BadArgument:
+            target = ctx.author
+        if target != ctx.author and not ctx.author.guild_permissions.manage_guild:
+            return await ctx.reply("Vain ylläpito voi linkata SteamID:n toiselle käyttäjälle.")
+        raw = args[1] if target != ctx.author else args[0]
+
+    if raw is None:
+        return await ctx.reply("Käyttö: `!link <steamid64>` tai `!link @user <steamid64>`")
+
+    resolved = extract_steamid64(raw.strip())
     if not resolved and "steamcommunity.com/id/" in raw:
         resolved = resolve_vanity_steamid64(raw)
     if not resolved:
         return await ctx.reply("Virheellinen SteamID64 tai profiililinkki.")
-    if await bot.db.is_steamid_taken(resolved, except_user_id=ctx.author.id):
+    if await bot.db.is_steamid_taken(resolved, except_user_id=target.id):
         return await ctx.reply("Tuo SteamID on jo linkattu toiselle.")
-    await bot.db.upsert_steam_link(ctx.author.id, resolved)
-    await ctx.reply("SteamID linkattu.")
+    await bot.db.upsert_steam_link(target.id, resolved)
+    if target.id == ctx.author.id:
+        await ctx.reply("SteamID linkattu.")
+    else:
+        await ctx.reply(f"SteamID linkattu käyttäjälle {target.mention}.")
 
 @bot.command(name="unlink")
 async def unlink_bang(ctx: commands.Context):
@@ -3434,6 +3886,11 @@ async def top10_bang(ctx: commands.Context):
 async def winners_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await winners_cmd.callback(interaction)
+
+@bot.command(name="maps")
+async def maps_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await maps_cmd.callback(interaction)
 
 @bot.command(name="captains")
 async def captains_bang(ctx: commands.Context):

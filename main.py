@@ -49,7 +49,7 @@ CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_lo
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
-CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
+CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "5"))
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -67,6 +67,20 @@ MAP_POOL = [
     "de_nuke",
     "de_overpass",
 ]
+
+def format_map_name(map_name: str) -> str:
+    if not map_name:
+        return map_name
+    cleaned = map_name
+    if cleaned.startswith("de_"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.replace("_", " ")
+    return cleaned.title()
+
+def format_map_list(map_names: List[str]) -> str:
+    if not map_names:
+        return "—"
+    return ", ".join(format_map_name(name) for name in map_names)
 
 # ---- Elo settings ----
 INITIAL_RATING = 1000.0
@@ -1405,7 +1419,7 @@ class MapVetoButton(discord.ui.Button):
     def __init__(self, map_name: str, row: int):
         super().__init__(
             style=discord.ButtonStyle.secondary,
-            label=map_name,
+            label=format_map_name(map_name),
             row=row,
             custom_id=f"map_veto_{map_name}",
         )
@@ -1751,8 +1765,8 @@ async def announce_next_veto(interaction: discord.Interaction, st: DraftState, p
         head += "\n"
 
     remaining = remaining_maps(st)
-    remaining_text = ", ".join(remaining) if remaining else "—"
-    banned_text = ", ".join(st.banned_maps) if st.banned_maps else "—"
+    remaining_text = format_map_list(remaining)
+    banned_text = format_map_list(st.banned_maps)
     content = (
         f"{head}"
         f"**Map veto**\n"
@@ -1807,9 +1821,10 @@ async def _apply_veto(interaction: discord.Interaction, st: DraftState, map_name
         await _finish_map_veto(interaction, st, remaining[0] if remaining else None)
         return
 
-    prefix = f"Kartta **{map_name}** bannattu."
+    map_label = format_map_name(map_name)
+    prefix = f"Kartta **{map_label}** bannattu."
     if is_autoban:
-        prefix = f"Aikaraja! Kartta **{map_name}** bannattu automaattisesti."
+        prefix = f"Aikaraja! Kartta **{map_label}** bannattu automaattisesti."
     await announce_next_veto(interaction, st, prefix=prefix)
 
 async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, selected_map: Optional[str]):
@@ -1824,7 +1839,7 @@ async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, sel
     if st.game_id:
         await bot.db.set_game_map(st.game_id, selected_map)
 
-    await interaction.followup.send(f"**Kartta valittu:** {selected_map}")
+    await interaction.followup.send(f"**Kartta valittu:** {format_map_name(selected_map)}")
     if st.veto_index > 0 and st.captains:
         last_team = st.veto_order[st.veto_index - 1] if st.veto_order else None
         chooser_team = "team1" if last_team == "team2" else "team2"
@@ -1944,7 +1959,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
 
         if AUTO_VOICE_CHANNELS:
             countdown_msg = await interaction.followup.send(
-                "Pelaajat siirretään voice-kanaville **15s** kuluttua…"
+                "Pelaajat siirretään voice-kanaville **5s** kuluttua…"
             )
             asyncio.create_task(
                 voice_move_countdown(
@@ -2062,14 +2077,14 @@ async def voice_move_countdown(
         if interaction.channel:
             try:
                 msg = await interaction.channel.send(
-                    "🎧 Pelaajat siirretään voice-kanaville **15s** kuluttua…"
+                    "🎧 Pelaajat siirretään voice-kanaville **5s** kuluttua…"
                 )
             except discord.HTTPException:
                 return
         else:
             return
 
-    seconds = 15
+    seconds = 5
     try:
         for remaining in range(seconds, 0, -1):
             try:
@@ -2973,14 +2988,14 @@ async def _attach_display_names(
             entry["display_name"] = entry.get("name") or str(entry["user_id"])
 
 def _format_match_stats_lines(stats: List[dict]) -> str:
-    header = "Name           K/A/D   K/D   ADR  RTG"
-    lines = [header]
+    header = f"{'Player':<16} {'K':>2} {'A':>2} {'D':>2}  {'K/D':>4} {'ADR':>5} {'RTG':>4}"
+    lines = [header, "-" * len(header)]
     for entry in stats:
         name = entry.get("display_name") or entry.get("name") or str(entry["user_id"])
-        name = name[:12]
-        kad = f"{entry['kills']}/{entry['assists']}/{entry['deaths']}"
+        name = name[:16]
         lines.append(
-            f"{name:<12} {kad:<7} {entry['kd']:.2f} {entry['adr']:.1f} {entry['rating']:.2f}"
+            f"{name:<16} {entry['kills']:>2} {entry['assists']:>2} {entry['deaths']:>2}  "
+            f"{entry['kd']:>4.2f} {entry['adr']:>5.1f} {entry['rating']:>4.2f}"
         )
     return "```\n" + "\n".join(lines) + "\n```"
 
@@ -2993,6 +3008,39 @@ def _build_match_stats_embed(title: str, stats: List[dict]) -> discord.Embed:
     )
     emb.set_footer(text=EMBED_FOOTER_TEXT)
     return emb
+
+async def _build_elo_change_report(
+    interaction: discord.Interaction,
+    game_id: int,
+    team1: List[int],
+    team2: List[int],
+) -> Optional[str]:
+    rating_history = await bot.db.get_rating_history_for_game(game_id)
+    if not rating_history:
+        return None
+
+    async def build_team_lines(team_ids: List[int]) -> List[str]:
+        lines: List[str] = []
+        for uid in team_ids:
+            if uid not in rating_history:
+                continue
+            name = await get_display_name(interaction, uid)
+            _pre, _post, delta = rating_history[uid]
+            sign = "+" if delta >= 0 else ""
+            lines.append(f"{name:<16} {sign}{delta:.1f}")
+        return lines
+
+    team1_lines = await build_team_lines(team1)
+    team2_lines = await build_team_lines(team2)
+
+    def block(lines: List[str]) -> str:
+        return "```\n" + ("\n".join(lines) if lines else "—") + "\n```"
+
+    return (
+        "Elo-muutokset:\n"
+        f"Team 1:\n{block(team1_lines)}\n"
+        f"Team 2:\n{block(team2_lines)}"
+    )
 
 async def watch_match_results(
     interaction: discord.Interaction,
@@ -3049,6 +3097,9 @@ async def watch_match_results(
                 await interaction.channel.send(
                     f"Peli `{game_id}` päättyi. {outcome_text}{score_text}."
                 )
+                elo_report = await _build_elo_change_report(interaction, game_id, team1, team2)
+                if elo_report:
+                    await interaction.channel.send(elo_report)
                 if match_stats:
                     team1_stats = [s for s in match_stats if s["user_id"] in team1]
                     team2_stats = [s for s in match_stats if s["user_id"] in team2]
@@ -3146,9 +3197,11 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
             watch_match_results(interaction, st, st.game_id, started_at_ts)
         )
 
-    connect_line = f"\nYhdistä: `{CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
+    connect_line = (
+        f"\nYhdistä: `connect {CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
+    )
     await interaction.followup.send(
-        f"Kartta: **{st.selected_map}**\n"
+        f"Kartta: **{format_map_name(st.selected_map)}**\n"
         f"Puolet: Team 1 **{st.team1_side}** / Team 2 **{st.team2_side}**"
         f"{connect_line}"
     )
@@ -3583,33 +3636,12 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
         elif winner in (1, 2):
             team1, team2 = await bot.db.set_winner(game_id, winner, overwrite=overwrite)
             msg_text = f"Voittaja (team {winner}) tallennettu pelille `{game_id}`."
-
-            rating_history = await bot.db.get_rating_history_for_game(game_id)
-            if rating_history:
-                async def build_team_changes(team_ids: List[int]) -> Tuple[str, float]:
-                    parts = []
-                    team_delta: Optional[float] = None
-                    for uid in team_ids:
-                        if uid not in rating_history:
-                            continue
-                        name = await get_display_name(interaction, uid)
-                        _pre, post, delta = rating_history[uid]
-                        if team_delta is None:
-                            team_delta = round(delta, 1)
-                        parts.append(f"{name} ({int(round(post))})")
-                    return (", ".join(parts) if parts else "—", team_delta or 0.0)
-
-                team1_changes, team1_delta = await build_team_changes(team1)
-                team2_changes, team2_delta = await build_team_changes(team2)
-                team1_sign = "+" if team1_delta >= 0 else ""
-                team2_sign = "+" if team2_delta >= 0 else ""
-                msg_text += (
-                    "\nElo-muutokset:"
-                    f"\nTeam 1 ({team1_sign}{team1_delta:.1f}): {team1_changes}"
-                    f"\nTeam 2 ({team2_sign}{team2_delta:.1f}): {team2_changes}"
-                )
         else:
             return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
+
+        elo_report = await _build_elo_change_report(interaction, game_id, team1, team2)
+        if elo_report:
+            msg_text += f"\n{elo_report}"
 
         # Lähetetään tulosviesti
         await interaction.response.send_message(msg_text)
@@ -3984,9 +4016,11 @@ async def winners_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="maps", description="Näytä karttojen peluumäärät")
 async def maps_cmd(interaction: discord.Interaction):
     counts = await bot.db.get_map_counts()
-    lines = [f"{map_name}: {counts.get(map_name, 0)}" for map_name in MAP_POOL]
-    extra_maps = sorted(name for name in counts.keys() if name not in MAP_POOL)
-    lines.extend(f"{map_name}: {counts.get(map_name, 0)}" for map_name in extra_maps)
+    all_maps = sorted(
+        set(MAP_POOL).union(counts.keys()),
+        key=lambda name: (-counts.get(name, 0), format_map_name(name)),
+    )
+    lines = [f"{format_map_name(map_name)}: {counts.get(map_name, 0)}" for map_name in all_maps]
     embed = discord.Embed(
         title="Karttojen peluumäärät",
         color=EMBED_COLOR_PRIMARY,

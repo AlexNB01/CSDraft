@@ -3794,8 +3794,9 @@ async def send_head_to_head_summary(
         lines = []
         for i, (opponent_id, wins, losses, draws, games, wr) in enumerate(items, start=1):
             name = await get_display_name(interaction, opponent_id)
+            wr_suffix = " WR" if i == 1 else ""
             lines.append(
-                f"{i}. {name} — {wr:.1f}% WR (W {wins} / L {losses} / D {draws}, {games} peliä)"
+                f"{i}. {name} — {wr:.1f}%{wr_suffix} (W {wins} / L {losses} / D {draws}, {games} peliä)"
             )
         return "\n".join(lines) if lines else "—"
 
@@ -3957,10 +3958,10 @@ async def winners_cmd(interaction: discord.Interaction):
     rows.sort(key=lambda r: (-r[1], -r[3], r[0].lower()))
 
     top = rows[:10]
-    lines = [
-        f"{i}. {name} / {wins} ({wr:.1f}% WR)"
-        for i, (name, wins, games, wr) in enumerate(top, start=1)
-    ]
+    lines = []
+    for i, (name, wins, games, wr) in enumerate(top, start=1):
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {wins} ({wr:.1f}%{wr_suffix})")
 
     embed = discord.Embed(
         title="Eniten pelejä voittaneet (Top 10)",
@@ -3993,10 +3994,10 @@ async def losers_cmd(interaction: discord.Interaction):
     rows.sort(key=lambda r: (-r[1], r[2], r[0].lower()))
 
     top = rows[:10]
-    lines = [
-        f"{i}. {name} / {losses} ({wr:.1f}% WR)"
-        for i, (name, losses, wr) in enumerate(top, start=1)
-    ]
+    lines = []
+    for i, (name, losses, wr) in enumerate(top, start=1):
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {losses} ({wr:.1f}%{wr_suffix})")
 
     embed = discord.Embed(
         title="Eniten pelejä hävinneet (Top 10)",
@@ -4037,7 +4038,8 @@ async def captains_cmd(interaction: discord.Interaction):
     for i, (uid, count, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         winrate = (wins / count * 100.0) if count > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({winrate:.1f}% WR)")
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%{wr_suffix})")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4059,7 +4061,8 @@ async def thinkids_cmd(interaction: discord.Interaction):
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}% WR)")
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}%{wr_suffix})")
 
     emb = discord.Embed(title="Eniten valittu ensimmäisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4081,7 +4084,8 @@ async def fatkids_cmd(interaction: discord.Interaction):
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}% WR)")
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}%{wr_suffix})")
 
     emb = discord.Embed(title="Eniten valittu viimeisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)

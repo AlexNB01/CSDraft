@@ -4396,9 +4396,9 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
     emb.add_field(
         name="Keskiarvot",
         value=(
-            f"**Kills:** {avg_kills:.1f}\n"
+            f"**Kills:** {round(avg_kills)}\n"
             f"**K/D:** {avg_kd:.2f}\n"
-            f"**ADR:** {avg_adr:.1f}\n"
+            f"**ADR:** {round(avg_adr)}\n"
             f"**Rating:** {avg_rating:.2f}"
         ),
         inline=False,
@@ -4408,7 +4408,7 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
         value=(
             f"**Kills:** {max_kills}\n"
             f"**K/D:** {max_kd:.2f}\n"
-            f"**ADR:** {max_adr:.1f}\n"
+            f"**ADR:** {round(max_adr)}\n"
             f"**Rating:** {max_rating:.2f}"
         ),
         inline=False,

@@ -2946,14 +2946,14 @@ async def _attach_display_names(
             entry["display_name"] = entry.get("name") or str(entry["user_id"])
 
 def _format_match_stats_lines(stats: List[dict]) -> str:
-    header = f"{'Player':<16} {'K':>2} {'A':>2} {'D':>2}  {'K/D':>4} {'ADR':>5} {'RTG':>4}"
+    header = f"{'Player':<18}  {'K':>2}  {'A':>2}  {'D':>2}   {'K/D':>4}  {'ADR':>5}  {'RTG':>4}"
     lines = [header, "-" * len(header)]
     for entry in stats:
         name = entry.get("display_name") or entry.get("name") or str(entry["user_id"])
-        name = name[:16]
+        name = name[:18]
         lines.append(
-            f"{name:<16} {entry['kills']:>2} {entry['assists']:>2} {entry['deaths']:>2}  "
-            f"{entry['kd']:>4.2f} {entry['adr']:>5.1f} {entry['rating']:>4.2f}"
+            f"{name:<18}  {entry['kills']:>2}  {entry['assists']:>2}  {entry['deaths']:>2}   "
+            f"{entry['kd']:>4.2f}  {entry['adr']:>5.1f}  {entry['rating']:>4.2f}"
         )
     return "```\n" + "\n".join(lines) + "\n```"
 

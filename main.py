@@ -31,7 +31,7 @@ QUEUE_SIZE = 10
 READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
-MAP_VETO_TIMEOUT_SECONDS = 45
+MAP_VETO_TIMEOUT_SECONDS = 30
 AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
 TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
@@ -46,7 +46,6 @@ CS2_MATCH_CONFIG_URL_BASE = os.getenv("CS2_MATCH_CONFIG_URL_BASE", "")
 CS2_MATCH_CONFIG_FORMAT = os.getenv("CS2_MATCH_CONFIG_FORMAT", "matchzy")
 CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
-CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
 CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "5"))
@@ -2297,9 +2296,9 @@ def _build_match_config(
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
     config_format = (CS2_MATCH_CONFIG_FORMAT or "matchzy").strip().lower()
-    start_cmds = f"{CS2_MATCH_PLUGIN_START_CMD},{CS2_MATCH_PLUGIN_START_CMDS}".lower()
     if config_format == "legacy" and (
-        "matchzy_loadmatch" in start_cmds or "matchzy_loadmatch_url" in start_cmds
+        "matchzy_loadmatch" in CS2_MATCH_PLUGIN_START_CMD.lower()
+        or "matchzy_loadmatch_url" in CS2_MATCH_PLUGIN_START_CMD.lower()
     ):
         config_format = "matchzy"
     if config_format == "legacy":
@@ -2349,9 +2348,6 @@ def _load_match_config_extras() -> dict:
     return payload
 
 def _match_start_cmds() -> List[str]:
-    if CS2_MATCH_PLUGIN_START_CMDS.strip():
-        cmds = [cmd.strip() for cmd in CS2_MATCH_PLUGIN_START_CMDS.split(",") if cmd.strip()]
-        return list(dict.fromkeys(cmds))
     return [CS2_MATCH_PLUGIN_START_CMD]
 
 def _write_match_config(path: str, data: dict) -> None:
@@ -2376,7 +2372,7 @@ def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
             continue
         return
     raise ConnectionError(
-        "MatchZy-käynnistys epäonnistui. Tarkista CS2_MATCH_PLUGIN_START_CMD/CMDS."
+        "MatchZy-käynnistys epäonnistui. Tarkista CS2_MATCH_PLUGIN_START_CMD."
         f" Viimeisin vastaus: {last_response}"
     )
 
@@ -2702,49 +2698,11 @@ def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, 
                 pass
     return None
 
-def _scan_match_results_dir(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
-    if not CS2_MATCH_RESULTS_DIR:
-        return None
-    if not os.path.isdir(CS2_MATCH_RESULTS_DIR):
-        return None
-    for entry in os.scandir(CS2_MATCH_RESULTS_DIR):
-        if not entry.is_file() or not entry.name.endswith(".json"):
-            continue
-        try:
-            if entry.stat().st_mtime < started_at_ts:
-                continue
-        except FileNotFoundError:
-            continue
-        try:
-            with open(entry.path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        match_id = _extract_match_id(payload)
-        if match_id and match_id != str(game_id):
-            continue
-        if not match_id and str(game_id) not in entry.name:
-            continue
-        score_pair = _extract_score_pair(payload)
-        winner = _extract_winner(payload)
-        if winner is None and score_pair:
-            score1, score2 = score_pair
-            if score1 == score2:
-                winner = 0
-            else:
-                winner = 1 if score1 > score2 else 2
-        if winner is None:
-            continue
-        return winner, score_pair
-    return None
-
 def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
     result = _scan_matchzy_db(game_id, started_at_ts)
     if result:
         return result
-    return _scan_match_results_dir(game_id, started_at_ts)
+    return None
 
 def _row_value(row: dict, key: str, default: int = 0) -> int:
     value = row.get(key)

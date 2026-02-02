@@ -3837,7 +3837,7 @@ async def send_head_to_head_summary(
         for i, (opponent_id, wins, losses, draws, games, wr) in enumerate(items, start=1):
             name = await get_display_name(interaction, opponent_id)
             lines.append(
-                f"{i}. {name} — {wr:.1f}% (W {wins} / L {losses} / D {draws}, {games} peliä)"
+                f"{i}. {name} — {wr:.1f}% WR (W {wins} / L {losses} / D {draws}, {games} peliä)"
             )
         return "\n".join(lines) if lines else "—"
 
@@ -4000,12 +4000,48 @@ async def winners_cmd(interaction: discord.Interaction):
 
     top = rows[:10]
     lines = [
-        f"{i}. {name} / {wins} ({wr:.1f}%)"
+        f"{i}. {name} / {wins} ({wr:.1f}% WR)"
         for i, (name, wins, games, wr) in enumerate(top, start=1)
     ]
 
     embed = discord.Embed(
         title="Eniten pelejä voittaneet (Top 10)",
+        description="\n".join(lines),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text="CSDraft by Alex")
+
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="losers", description="Näytä eniten pelejä hävinneet pelaajat (Top 10)")
+async def losers_cmd(interaction: discord.Interaction):
+    async with aiosqlite.connect(bot.db.path) as db:
+        cur = await db.execute("SELECT user_id, wins, games_played FROM players")
+        players = await cur.fetchall()
+
+    if not players:
+        await interaction.response.send_message("Tietokannassa ei ole vielä pelaajia.", ephemeral=True)
+        return
+
+    draw_map = await bot.db.get_draws_for_users([uid for uid, _, _ in players])
+    rows = []
+    for uid, wins, games in players:
+        draws = draw_map.get(uid, 0)
+        losses = max(0, games - wins - draws)
+        wr = ((wins + draws * 0.5) / games * 100.0) if games > 0 else 0.0
+        name = await get_display_name(interaction, uid)
+        rows.append((name, losses, wr))
+
+    rows.sort(key=lambda r: (-r[1], r[2], r[0].lower()))
+
+    top = rows[:10]
+    lines = [
+        f"{i}. {name} / {losses} ({wr:.1f}% WR)"
+        for i, (name, losses, wr) in enumerate(top, start=1)
+    ]
+
+    embed = discord.Embed(
+        title="Eniten pelejä hävinneet (Top 10)",
         description="\n".join(lines),
         color=discord.Color.blurple()
     )
@@ -4043,7 +4079,7 @@ async def captains_cmd(interaction: discord.Interaction):
     for i, (uid, count, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         winrate = (wins / count * 100.0) if count > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
+        lines.append(f"{i}. {name} / {count} ({winrate:.1f}% WR)")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4065,7 +4101,7 @@ async def thinkids_cmd(interaction: discord.Interaction):
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}% WR)")
 
     emb = discord.Embed(title="Eniten valittu ensimmäisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4087,7 +4123,7 @@ async def fatkids_cmd(interaction: discord.Interaction):
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}% WR)")
 
     emb = discord.Embed(title="Eniten valittu viimeisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4323,6 +4359,11 @@ async def winners_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await winners_cmd.callback(interaction)
 
+@bot.command(name="losers")
+async def losers_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await losers_cmd.callback(interaction)
+
 @bot.command(name="maps")
 async def maps_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
@@ -4395,9 +4436,9 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
     )
     emb.add_field(name="Pelit", value=str(games), inline=False)
     emb.add_field(
-        name="Keskiarvot (K/D = total kills / max(1, total deaths))",
+        name="Keskiarvot",
         value=(
-            f"**Kills/match:** {avg_kills:.1f}\n"
+            f"**Kills:** {avg_kills:.1f}\n"
             f"**K/D:** {avg_kd:.2f}\n"
             f"**ADR:** {avg_adr:.1f}\n"
             f"**Rating:** {avg_rating:.2f}"
@@ -4405,7 +4446,7 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
         inline=False,
     )
     emb.add_field(
-        name="Ennätykset (single-match max)",
+        name="Ennätykset",
         value=(
             f"**Kills:** {max_kills}\n"
             f"**K/D:** {max_kd:.2f}\n"

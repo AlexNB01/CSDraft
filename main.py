@@ -12,6 +12,7 @@ import re
 import urllib.request
 import urllib.parse
 import sqlite3
+import math
 from types import SimpleNamespace
 from collections import Counter
 from dataclasses import dataclass, field
@@ -47,7 +48,6 @@ CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
-CS2_MATCH_RESULTS_DIR = os.getenv("CS2_MATCH_RESULTS_DIR", "")
 CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
 CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
 
@@ -232,6 +232,22 @@ CREATE TABLE IF NOT EXISTS steam_links (
   discord_user_id INTEGER PRIMARY KEY,
   steamid64 TEXT NOT NULL UNIQUE,
   linked_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS match_player_stats (
+  game_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  steamid64 TEXT NOT NULL,
+  kills INTEGER NOT NULL,
+  deaths INTEGER NOT NULL,
+  assists INTEGER NOT NULL,
+  damage INTEGER NOT NULL,
+  rounds INTEGER NOT NULL,
+  adr REAL NOT NULL,
+  kd REAL NOT NULL,
+  rating REAL NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(game_id, user_id)
 );
 """
 
@@ -463,6 +479,73 @@ class DB:
             for uid, pre_rating, post_rating, delta in rows
         }
 
+    async def upsert_match_player_stats(self, game_id: int, stats: List[dict]) -> None:
+        if not stats:
+            return
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                for entry in stats:
+                    await db.execute(
+                        """
+                        INSERT INTO match_player_stats
+                        (game_id, user_id, steamid64, kills, deaths, assists, damage, rounds, adr, kd, rating, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(game_id, user_id) DO UPDATE SET
+                            steamid64 = excluded.steamid64,
+                            kills = excluded.kills,
+                            deaths = excluded.deaths,
+                            assists = excluded.assists,
+                            damage = excluded.damage,
+                            rounds = excluded.rounds,
+                            adr = excluded.adr,
+                            kd = excluded.kd,
+                            rating = excluded.rating,
+                            created_at = excluded.created_at
+                        """,
+                        (
+                            str(game_id),
+                            entry["user_id"],
+                            entry["steamid64"],
+                            entry["kills"],
+                            entry["deaths"],
+                            entry["assists"],
+                            entry["damage"],
+                            entry["rounds"],
+                            entry["adr"],
+                            entry["kd"],
+                            entry["rating"],
+                            timestamp,
+                        ),
+                    )
+                await db.commit()
+
+    async def get_match_player_stats_for_user(self, user_id: int) -> List[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                SELECT kills, deaths, assists, damage, rounds, adr, kd, rating
+                FROM match_player_stats
+                WHERE user_id = ?
+                ORDER BY created_at ASC
+                """,
+                (user_id,),
+            )
+            rows = await cur.fetchall()
+        return [
+            {
+                "kills": int(row[0]),
+                "deaths": int(row[1]),
+                "assists": int(row[2]),
+                "damage": int(row[3]),
+                "rounds": int(row[4]),
+                "adr": float(row[5]),
+                "kd": float(row[6]),
+                "rating": float(row[7]),
+            }
+            for row in rows
+        ]
+
     async def _rollback_ratings_for_game_tx(self, db: aiosqlite.Connection, game_id: int) -> None:
         cur = await db.execute(
             "SELECT user_id, pre_rating FROM rating_history WHERE game_id = ?",
@@ -519,6 +602,21 @@ class DB:
         )
         rows = await cur.fetchall()
         ratings_map = {int(uid): (float(rating), int(games)) for uid, rating, games in rows}
+        perf_ratings: Dict[int, float] = {}
+        try:
+            cur = await db.execute(
+                f"""
+                SELECT user_id, rating
+                FROM match_player_stats
+                WHERE game_id = ?
+                AND user_id IN ({placeholders})
+                """,
+                (str(game_id), *tuple(all_ids)),
+            )
+            rows = await cur.fetchall()
+            perf_ratings = {int(uid): float(rating) for uid, rating in rows}
+        except aiosqlite.Error:
+            perf_ratings = {}
 
         team1_ratings = [ratings_map[uid][0] for uid in team1_ids]
         team2_ratings = [ratings_map[uid][0] for uid in team2_ids]
@@ -546,7 +644,19 @@ class DB:
                     delta = _clip(delta, -MAX_DRAW_DELTA, MAX_DRAW_DELTA)
                 else:
                     delta = _clip(delta, -MAX_MATCH_DELTA, MAX_MATCH_DELTA)
-                new_rating = rating + delta
+                perf_rating = perf_ratings.get(uid)
+                perf_delta = 0.0
+                if perf_rating is not None:
+                    perf_delta = _clip(
+                        round((perf_rating - 1.0) / 0.20 * 5),
+                        -5,
+                        5,
+                    )
+                total_delta = delta + perf_delta
+                # Clamp final delta to base max + performance modifier cap.
+                max_total = MAX_DRAW_DELTA + 5 if score_team == 0.5 else MAX_MATCH_DELTA + 5
+                total_delta = _clip(total_delta, -max_total, max_total)
+                new_rating = rating + total_delta
 
                 await db.execute(
                     "UPDATE ratings SET rating = ?, elo_games = elo_games + 1 WHERE user_id = ?",
@@ -563,7 +673,7 @@ class DB:
                         uid,
                         rating,
                         new_rating,
-                        delta,
+                        total_delta,
                         timestamp,
                     ),
                 )
@@ -2621,6 +2731,269 @@ def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[in
         return result
     return _scan_match_results_dir(game_id, started_at_ts)
 
+def _row_value(row: dict, key: str, default: int = 0) -> int:
+    value = row.get(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _normalize_steamid64(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return str(int(value))
+    text = str(value).strip()
+    return text or None
+
+def _compute_population_std(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((val - mean) ** 2 for val in values) / len(values)
+    return math.sqrt(variance)
+
+def _compute_match_ratings(stats: List[dict], rounds: int) -> None:
+    if not stats:
+        return
+    rounds = max(1, rounds)
+    for entry in stats:
+        entry["kpr"] = entry["kills"] / rounds
+        entry["dpr"] = entry["deaths"] / rounds
+        entry["adr"] = entry["damage"] / rounds
+        entry["apr"] = entry["assists"] / rounds
+        mk = (
+            entry["enemy2ks"]
+            + 2 * entry["enemy3ks"]
+            + 3 * entry["enemy4ks"]
+            + 4 * entry["enemy5ks"]
+        )
+        entry["mkpr"] = mk / rounds
+        entry["rounds"] = rounds
+        entry["kd"] = entry["kills"] / max(1, entry["deaths"])
+
+    def z_score(key: str) -> List[float]:
+        values = [entry[key] for entry in stats]
+        mean = sum(values) / len(values)
+        std = _compute_population_std(values)
+        if std == 0:
+            return [0.0 for _ in values]
+        return [(val - mean) / std for val in values]
+
+    z_kpr = z_score("kpr")
+    z_adr = z_score("adr")
+    z_mkpr = z_score("mkpr")
+    z_apr = z_score("apr")
+    z_dpr = z_score("dpr")
+
+    for entry, zk, za, zm, zb, zd in zip(stats, z_kpr, z_adr, z_mkpr, z_apr, z_dpr):
+        score = 0.34 * zk + 0.34 * za + 0.16 * zm + 0.10 * zb - 0.14 * zd
+        rating = _clip(1.0 + 0.20 * score, 0.0, 2.0)
+        entry["rating"] = rating
+
+def _fetch_matchzy_score_pair(game_id: int) -> Optional[Tuple[int, int]]:
+    if not CS2_MATCH_RESULTS_DB:
+        return None
+    if not os.path.isfile(CS2_MATCH_RESULTS_DB):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(CS2_MATCH_RESULTS_DB)
+        conn.row_factory = sqlite3.Row
+        tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        if "matchzy_stats_maps" not in tables:
+            return None
+        table = "matchzy_stats_maps"
+        columns = [row["name"] for row in conn.execute(f"PRAGMA table_info(\"{table}\")")]
+        column_map = {_normalize_identifier(name): name for name in columns}
+        match_col = column_map.get("matchid")
+        if not match_col:
+            return None
+        map_col = column_map.get("mapnumber")
+        score_cols = None
+        for left, right in (("team1score", "team2score"), ("scoreteam1", "scoreteam2")):
+            if left in column_map and right in column_map:
+                score_cols = (column_map[left], column_map[right])
+                break
+        if not score_cols:
+            return None
+        params = (str(game_id),)
+        sql = f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ?"
+        rows = list(conn.execute(sql, params))
+        if not rows:
+            rows = list(conn.execute(sql, (game_id,)))
+        if not rows:
+            return None
+        if map_col:
+            zero_rows = [row for row in rows if row[map_col] == 0]
+            row = zero_rows[0] if zero_rows else rows[-1]
+        else:
+            row = rows[-1]
+        try:
+            return int(row[score_cols[0]]), int(row[score_cols[1]])
+        except (TypeError, ValueError):
+            return None
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return None
+
+def _fetch_matchzy_stats_players(game_id: int) -> List[dict]:
+    if not CS2_MATCH_RESULTS_DB:
+        return []
+    if not os.path.isfile(CS2_MATCH_RESULTS_DB):
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(CS2_MATCH_RESULTS_DB)
+        conn.row_factory = sqlite3.Row
+        tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        if "matchzy_stats_players" not in tables:
+            return []
+        table = "matchzy_stats_players"
+        columns = [row["name"] for row in conn.execute(f"PRAGMA table_info(\"{table}\")")]
+        column_map = {_normalize_identifier(name): name for name in columns}
+        match_col = None
+        for candidate in ("matchid", "matchid64", "gameid", "id"):
+            if candidate in column_map:
+                match_col = column_map[candidate]
+                break
+        if not match_col:
+            return []
+        map_col = column_map.get("mapnumber")
+        params = (str(game_id),)
+        rows: List[sqlite3.Row] = []
+        if map_col:
+            rows = list(
+                conn.execute(
+                    f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ? AND \"{map_col}\" = 0",
+                    params,
+                )
+            )
+            if not rows:
+                rows = list(
+                    conn.execute(
+                        f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ? AND \"{map_col}\" = 0",
+                        (game_id,),
+                    )
+                )
+            if not rows:
+                cur = conn.execute(
+                    f"SELECT MAX(\"{map_col}\") FROM \"{table}\" WHERE \"{match_col}\" = ?",
+                    params,
+                )
+                max_row = cur.fetchone()
+                max_map = max_row[0] if max_row else None
+                if max_map is not None:
+                    rows = list(
+                        conn.execute(
+                            f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ? AND \"{map_col}\" = ?",
+                            params + (max_map,),
+                        )
+                    )
+                    if not rows:
+                        rows = list(
+                            conn.execute(
+                                f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ? AND \"{map_col}\" = ?",
+                                (game_id, max_map),
+                            )
+                        )
+        else:
+            rows = list(conn.execute(f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ?", params))
+            if not rows:
+                rows = list(conn.execute(f"SELECT * FROM \"{table}\" WHERE \"{match_col}\" = ?", (game_id,)))
+        return [{_normalize_identifier(key): row[key] for key in row.keys()} for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+def _build_match_stats(
+    game_id: int,
+    steamid_to_user: Dict[str, int],
+    score_pair: Optional[Tuple[int, int]],
+) -> Tuple[List[dict], int]:
+    rows = _fetch_matchzy_stats_players(game_id)
+    if not rows:
+        return [], 0
+    if not score_pair:
+        score_pair = _fetch_matchzy_score_pair(game_id)
+    if score_pair:
+        total_rounds = score_pair[0] + score_pair[1]
+    else:
+        print(f"Match {game_id}: puuttuvat scoret, käytetään fallbackia 30.")
+        total_rounds = 30
+    if total_rounds <= 0:
+        total_rounds = 30
+    stats: List[dict] = []
+    for row in rows:
+        steamid = _normalize_steamid64(row.get("steamid64"))
+        if not steamid:
+            continue
+        user_id = steamid_to_user.get(steamid)
+        if not user_id:
+            continue
+        entry = {
+            "user_id": user_id,
+            "steamid64": steamid,
+            "name": row.get("name") or steamid,
+            "team": row.get("team"),
+            "kills": _row_value(row, "kills"),
+            "deaths": _row_value(row, "deaths"),
+            "assists": _row_value(row, "assists"),
+            "damage": _row_value(row, "damage"),
+            "enemy2ks": _row_value(row, "enemy2ks"),
+            "enemy3ks": _row_value(row, "enemy3ks"),
+            "enemy4ks": _row_value(row, "enemy4ks"),
+            "enemy5ks": _row_value(row, "enemy5ks"),
+        }
+        stats.append(entry)
+    _compute_match_ratings(stats, total_rounds)
+    return stats, total_rounds
+
+async def _attach_display_names(
+    interaction: discord.Interaction,
+    stats: List[dict],
+) -> None:
+    for entry in stats:
+        try:
+            entry["display_name"] = await get_display_name(interaction, entry["user_id"])
+        except Exception:
+            entry["display_name"] = entry.get("name") or str(entry["user_id"])
+
+def _format_match_stats_lines(stats: List[dict]) -> str:
+    header = "Name           K/A/D   K/D   ADR  RTG"
+    lines = [header]
+    for entry in stats:
+        name = entry.get("display_name") or entry.get("name") or str(entry["user_id"])
+        name = name[:12]
+        kad = f"{entry['kills']}/{entry['assists']}/{entry['deaths']}"
+        lines.append(
+            f"{name:<12} {kad:<7} {entry['kd']:.2f} {entry['adr']:.1f} {entry['rating']:.2f}"
+        )
+    return "```\n" + "\n".join(lines) + "\n```"
+
+def _build_match_stats_embed(title: str, stats: List[dict]) -> discord.Embed:
+    emb = discord.Embed(title=title, color=EMBED_COLOR_PRIMARY)
+    emb.add_field(
+        name="K/A/D · K/D · ADR · Rating",
+        value=_format_match_stats_lines(stats),
+        inline=False,
+    )
+    emb.set_footer(text=EMBED_FOOTER_TEXT)
+    return emb
+
 async def watch_match_results(
     interaction: discord.Interaction,
     st: DraftState,
@@ -2641,6 +3014,25 @@ async def watch_match_results(
             if not result:
                 continue
             winner, score_pair = result
+            game = await bot.db.get_game(game_id)
+            if not game:
+                break
+            team1 = game["team1"]
+            team2 = game["team2"]
+            all_players = team1 + team2
+            steam_map = await bot.db.get_steamids(all_players)
+            steamid_to_user = {steamid: uid for uid, steamid in steam_map.items()}
+            match_stats, total_rounds = await asyncio.to_thread(
+                _build_match_stats,
+                game_id,
+                steamid_to_user,
+                score_pair,
+            )
+            if match_stats:
+                await _attach_display_names(interaction, match_stats)
+                await bot.db.upsert_match_player_stats(game_id, match_stats)
+            else:
+                print(f"Match {game_id}: MatchZy-tilastot puuttuvat tai pelaajia ei löytynyt.")
             try:
                 if winner == 0:
                     team1, team2 = await bot.db.set_draw(game_id)
@@ -2657,7 +3049,17 @@ async def watch_match_results(
                 await interaction.channel.send(
                     f"Peli `{game_id}` päättyi. {outcome_text}{score_text}."
                 )
-                all_players = team1 + team2
+                if match_stats:
+                    team1_stats = [s for s in match_stats if s["user_id"] in team1]
+                    team2_stats = [s for s in match_stats if s["user_id"] in team2]
+                    if team1_stats:
+                        await interaction.channel.send(
+                            embed=_build_match_stats_embed("Team 1 stats", team1_stats)
+                        )
+                    if team2_stats:
+                        await interaction.channel.send(
+                            embed=_build_match_stats_embed("Team 2 stats", team2_stats)
+                        )
                 countdown_msg = await interaction.channel.send(
                     "Pelaajat siirretään aulaan **15s** kuluttua…"
                 )
@@ -2738,7 +3140,7 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
 
     if st.result_task and not st.result_task.done():
         st.result_task.cancel()
-    if CS2_MATCH_RESULTS_DIR and st.game_id:
+    if CS2_MATCH_RESULTS_DB and st.game_id:
         started_at_ts = time.time()
         st.result_task = asyncio.create_task(
             watch_match_results(interaction, st, st.game_id, started_at_ts)
@@ -3922,6 +4324,64 @@ async def allowcaptain_bang(ctx: commands.Context):
 async def elo_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
     interaction = InteractionShim(ctx)
     await elo_cmd.callback(interaction, user or ctx.author)
+
+@bot.command(name="csstats")
+async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
+    user = ctx.author
+    if target:
+        resolved = await resolve_user_from_text(ctx.guild, target)
+        if not resolved:
+            return await ctx.reply("En löytänyt käyttäjää annetulla nimellä tai ID:llä.")
+        user = resolved
+
+    steamid64 = await bot.db.get_steamid(user.id)
+    if not steamid64:
+        return await ctx.reply("Käyttäjällä ei ole SteamID-linkkiä.")
+
+    stats = await bot.db.get_match_player_stats_for_user(user.id)
+    if not stats:
+        return await ctx.reply("Tilastoja ei löytynyt vielä yhdestäkään ottelusta.")
+
+    games = len(stats)
+    total_kills = sum(entry["kills"] for entry in stats)
+    total_deaths = sum(entry["deaths"] for entry in stats)
+    avg_kills = total_kills / games
+    avg_kd = total_kills / max(1, total_deaths)
+    avg_adr = sum(entry["adr"] for entry in stats) / games
+    avg_rating = sum(entry["rating"] for entry in stats) / games
+
+    max_kills = max(entry["kills"] for entry in stats)
+    max_kd = max(entry["kd"] for entry in stats)
+    max_adr = max(entry["adr"] for entry in stats)
+    max_rating = max(entry["rating"] for entry in stats)
+
+    emb = discord.Embed(
+        title=f"CS Stats — {user.display_name}",
+        color=EMBED_COLOR_PRIMARY,
+    )
+    emb.add_field(name="Pelit", value=str(games), inline=False)
+    emb.add_field(
+        name="Keskiarvot (K/D = total kills / max(1, total deaths))",
+        value=(
+            f"**Kills/match:** {avg_kills:.1f}\n"
+            f"**K/D:** {avg_kd:.2f}\n"
+            f"**ADR:** {avg_adr:.1f}\n"
+            f"**Rating:** {avg_rating:.2f}"
+        ),
+        inline=False,
+    )
+    emb.add_field(
+        name="Ennätykset (single-match max)",
+        value=(
+            f"**Kills:** {max_kills}\n"
+            f"**K/D:** {max_kd:.2f}\n"
+            f"**ADR:** {max_adr:.1f}\n"
+            f"**Rating:** {max_rating:.2f}"
+        ),
+        inline=False,
+    )
+    emb.set_footer(text=EMBED_FOOTER_TEXT)
+    await ctx.reply(embed=emb)
 
 @bot.command(name="topelo")
 async def topelo_bang(ctx: commands.Context):

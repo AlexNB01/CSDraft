@@ -48,7 +48,6 @@ CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
 CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
-CS2_MATCH_RESULTS_DIR = os.getenv("CS2_MATCH_RESULTS_DIR", "")
 CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
 CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
 
@@ -3141,7 +3140,7 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
 
     if st.result_task and not st.result_task.done():
         st.result_task.cancel()
-    if CS2_MATCH_RESULTS_DIR and st.game_id:
+    if CS2_MATCH_RESULTS_DB) and st.game_id:
         started_at_ts = time.time()
         st.result_task = asyncio.create_task(
             watch_match_results(interaction, st, st.game_id, started_at_ts)

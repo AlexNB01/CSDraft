@@ -559,6 +559,27 @@ class DB:
             for row in rows
         ]
 
+    async def get_most_played_map_for_user(self, user_id: int) -> Optional[Tuple[str, int]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                SELECT games.map, COUNT(*) AS plays
+                FROM match_player_stats
+                JOIN games ON games.id = match_player_stats.game_id
+                WHERE match_player_stats.user_id = ?
+                AND games.map IS NOT NULL
+                AND games.map != ''
+                GROUP BY games.map
+                ORDER BY plays DESC, games.map ASC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return str(row[0]), int(row[1])
+
     async def _rollback_ratings_for_game_tx(self, db: aiosqlite.Connection, game_id: int) -> None:
         cur = await db.execute(
             "SELECT user_id, pre_rating FROM rating_history WHERE game_id = ?",
@@ -4245,14 +4266,6 @@ async def mysteam_bang(ctx: commands.Context):
     except Exception:
         await ctx.reply(f"SteamID64: {mask_steamid64(steamid64)}")
 
-@bot.command(name="startserver")
-async def startserver_bang(ctx: commands.Context):
-    if not ctx.author.guild_permissions.manage_guild:
-        return await ctx.reply("Vain ylläpito voi käynnistää serverin.")
-    interaction = InteractionShim(ctx)
-    st = bot.get_state(ctx.guild.id if ctx.guild else 0)
-    await start_server_orchestration(interaction, st)
-
 @bot.command(name="add", aliases=["dad", "bad", "ad", "dab", "sad", "mad", "dda", "aada", "addme", "da", "meadd", "lisää", "lisaa", "adam", "peliä", "pelejä", "peli", "ass", "addd", "addista", "addistä", "adidas", "lisäyskomento", "lisäää", "lissää", "moti100", "join", "play", "pelataan", "pistämutjonoon", "gaming", "messiin", "liity", "mukaan", "lisäys", "nike", "puma", "josonpakko", "askel", "bugatti", "sievi", "kuoma", "jalas", "taasmenään", "hyllymbvör","eioomuutakaantekemistä","newbalance","onkopakko","asics","ejendals","roka","erect","suutujo","cs"])
 async def add_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
@@ -4391,6 +4404,7 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
     max_kd = max(entry["kd"] for entry in stats)
     max_adr = max(entry["adr"] for entry in stats)
     max_rating = max(entry["rating"] for entry in stats)
+    most_played = await bot.db.get_most_played_map_for_user(user.id)
 
     emb = discord.Embed(
         title=f"CS Stats — {user.display_name}",
@@ -4415,6 +4429,15 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
             f"**ADR:** {round(max_adr)}\n"
             f"**Rating:** {max_rating:.2f}"
         ),
+        inline=False,
+    )
+    most_played_text = "—"
+    if most_played:
+        map_name, plays = most_played
+        most_played_text = f"{format_map_name(map_name)} ({plays})"
+    emb.add_field(
+        name="Pelatuin kartta",
+        value=most_played_text,
         inline=False,
     )
     emb.set_footer(text=EMBED_FOOTER_TEXT)

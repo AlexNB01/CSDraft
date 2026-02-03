@@ -135,8 +135,7 @@ CS2_MATCH_RESULTS_POLL_SECONDS=5
 |---------|-------------|
 | `!unlink` | Remove your linked SteamID |
 | `!mysteam` | DM your linked SteamID |
-| `!csstats [user]` | Show MatchZy-derived CS stats (kills, deaths, ADR, rating) |
-| `!startserver` | Force MatchZy config + server start (admin) |
+| `!csstats [user]` | Show MatchZy-derived CS stats (kills, deaths, ADR, rating, most played map) |
 
 ## Flow for queue
 
@@ -172,7 +171,8 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 
 ### 6. Post-Game
 
-- Typically captain sets winner with `/setwinner <game_id> <1|2>` or `/setdraw <game_id>`
+- Match result is pulled from the MatchZy database and the winner is set automatically
+- Bot posts the result, Elo changes, and team stat embeds
 - Stats are updated automatically
 - Players moved back to lobby voice channel after 15 seconds
 
@@ -251,6 +251,7 @@ Elo ratings are calculated per match using the team average ratings, then applie
 - **Expected score:** `1 / (1 + 10^((team_b_avg - team_a_avg) / 400))`
 - **Delta:** `BASE_MATCH_DELTA * (score - expected)` where score is 1.0 for a win, 0.0 for a loss, and 0.5 for a draw
 - **Caps:** win/loss deltas are clamped to ±30; draw deltas are clamped to ±5
+- **Performance modifier:** player MatchZy rating adds a small bonus/penalty (±5) on top of the base delta
 - **Tracking:** every rating change is saved to `rating_history` with pre/post ratings and the delta
 
 ### Testing Mode

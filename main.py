@@ -1772,7 +1772,7 @@ async def announce_next_veto(interaction: discord.Interaction, st: DraftState, p
         f"Vuoro: {mention(captain)} ({team_label})\n"
         f"Jäljellä: {remaining_text}\n"
         f"Bannatut: {banned_text}\n"
-        f"Klikkaa karttaa banataksesi."
+        f"Klikkaa karttaa bannataksesi."
     )
     view = await build_veto_view(st)
 
@@ -2430,33 +2430,55 @@ def _extract_match_id(payload: dict) -> Optional[str]:
     return None
 
 def _extract_score_pair(payload: dict) -> Optional[Tuple[int, int]]:
-    if "team1_score" in payload and "team2_score" in payload:
-        try:
-            return int(payload["team1_score"]), int(payload["team2_score"])
-        except (TypeError, ValueError):
+    for key1, key2 in (
+        ("team1_score", "team2_score"),
+        ("score_team1", "score_team2"),
+        ("team1Score", "team2Score"),
+        ("scoreTeam1", "scoreTeam2"),
+    ):
+        if key1 in payload and key2 in payload:
+            try:
+                return int(payload[key1]), int(payload[key2])
+            except (TypeError, ValueError):
+                return None
+    team1 = payload.get("team1")
+    team2 = payload.get("team2")
+    if isinstance(team1, dict) and isinstance(team2, dict):
+        def extract_team_score(team: dict) -> Optional[int]:
+            for key in ("score", "map_score", "series_score", "total_score"):
+                if key in team:
+                    try:
+                        return int(team[key])
+                    except (TypeError, ValueError):
+                        return None
             return None
+        score1 = extract_team_score(team1)
+        score2 = extract_team_score(team2)
+        if score1 is not None and score2 is not None:
+            return score1, score2
     match = payload.get("match")
     if isinstance(match, dict):
         return _extract_score_pair(match)
     return None
 
 def _extract_winner(payload: dict) -> Optional[int]:
-    if "winner" in payload:
-        value = payload["winner"]
-        if isinstance(value, str):
-            lowered = value.lower()
-            if lowered in {"team1", "team_1", "1"}:
-                return 1
-            if lowered in {"team2", "team_2", "2"}:
-                return 2
-            if lowered in {"draw", "tie"}:
-                return 0
-        try:
-            winner = int(value)
-        except (TypeError, ValueError):
-            winner = None
-        if winner in (0, 1, 2):
-            return winner
+    for key in ("winner", "winner_team", "winnerTeam"):
+        if key in payload:
+            value = payload[key]
+            if isinstance(value, str):
+                lowered = value.lower()
+                if lowered in {"team1", "team_1", "1"}:
+                    return 1
+                if lowered in {"team2", "team_2", "2"}:
+                    return 2
+                if lowered in {"draw", "tie"}:
+                    return 0
+            try:
+                winner = int(value)
+            except (TypeError, ValueError):
+                continue
+            if winner in (0, 1, 2):
+                return winner
     match = payload.get("match")
     if isinstance(match, dict):
         return _extract_winner(match)
@@ -2489,10 +2511,24 @@ def _pick_latest_row(
     column_map: Dict[str, str],
     started_at_ts: float,
 ) -> Optional[sqlite3.Row]:
-    timestamp_keys = [_normalize_identifier("end_time")]
+    timestamp_keys = [
+        "finishedat",
+        "finished_at",
+        "endedat",
+        "ended_at",
+        "completedat",
+        "completed_at",
+        "updatedat",
+        "updated_at",
+        "ended",
+        "endtime",
+        "end_time",
+        "createdat",
+        "created_at",
+        "startedat",
+        "started_at",
+    ]
     timestamp_cols = [column_map[key] for key in timestamp_keys if key in column_map]
-    if not timestamp_cols:
-        return None
     best_row = None
     best_ts = None
 
@@ -2520,10 +2556,12 @@ def _pick_latest_row(
             best_ts = row_ts
             best_row = row
 
+    if best_row is None and rows:
+        return rows[-1]
     return best_row
 
 def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
-    end_time_keys = [_normalize_identifier("end_time")]
+    end_time_keys = ["endtime", "end_time", "end"]
     for key in end_time_keys:
         col = column_map.get(key)
         if not col:
@@ -2532,7 +2570,37 @@ def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
         if value in (None, ""):
             return False
         return True
-    return False
+
+    flag_keys = [
+        "finished",
+        "isfinished",
+        "is_finished",
+        "completed",
+        "iscompleted",
+        "is_completed",
+        "ended",
+        "isended",
+        "is_ended",
+    ]
+    for key in flag_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "finished", "completed", "ended"}
+    status_keys = ["status", "state", "matchstate", "match_state"]
+    for key in status_keys:
+        col = column_map.get(key)
+        if not col:
+            continue
+        value = row[col]
+        if isinstance(value, str):
+            lowered = value.lower()
+            return lowered in {"finished", "completed", "ended", "done"}
+    return True
 
 def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
     if not CS2_MATCH_RESULTS_DB:

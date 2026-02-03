@@ -2430,55 +2430,33 @@ def _extract_match_id(payload: dict) -> Optional[str]:
     return None
 
 def _extract_score_pair(payload: dict) -> Optional[Tuple[int, int]]:
-    for key1, key2 in (
-        ("team1_score", "team2_score"),
-        ("score_team1", "score_team2"),
-        ("team1Score", "team2Score"),
-        ("scoreTeam1", "scoreTeam2"),
-    ):
-        if key1 in payload and key2 in payload:
-            try:
-                return int(payload[key1]), int(payload[key2])
-            except (TypeError, ValueError):
-                return None
-    team1 = payload.get("team1")
-    team2 = payload.get("team2")
-    if isinstance(team1, dict) and isinstance(team2, dict):
-        def extract_team_score(team: dict) -> Optional[int]:
-            for key in ("score", "map_score", "series_score", "total_score"):
-                if key in team:
-                    try:
-                        return int(team[key])
-                    except (TypeError, ValueError):
-                        return None
+    if "team1_score" in payload and "team2_score" in payload:
+        try:
+            return int(payload["team1_score"]), int(payload["team2_score"])
+        except (TypeError, ValueError):
             return None
-        score1 = extract_team_score(team1)
-        score2 = extract_team_score(team2)
-        if score1 is not None and score2 is not None:
-            return score1, score2
     match = payload.get("match")
     if isinstance(match, dict):
         return _extract_score_pair(match)
     return None
 
 def _extract_winner(payload: dict) -> Optional[int]:
-    for key in ("winner", "winner_team", "winnerTeam"):
-        if key in payload:
-            value = payload[key]
-            if isinstance(value, str):
-                lowered = value.lower()
-                if lowered in {"team1", "team_1", "1"}:
-                    return 1
-                if lowered in {"team2", "team_2", "2"}:
-                    return 2
-                if lowered in {"draw", "tie"}:
-                    return 0
-            try:
-                winner = int(value)
-            except (TypeError, ValueError):
-                continue
-            if winner in (0, 1, 2):
-                return winner
+    if "winner" in payload:
+        value = payload["winner"]
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in {"team1", "team_1", "1"}:
+                return 1
+            if lowered in {"team2", "team_2", "2"}:
+                return 2
+            if lowered in {"draw", "tie"}:
+                return 0
+        try:
+            winner = int(value)
+        except (TypeError, ValueError):
+            winner = None
+        if winner in (0, 1, 2):
+            return winner
     match = payload.get("match")
     if isinstance(match, dict):
         return _extract_winner(match)
@@ -2511,23 +2489,7 @@ def _pick_latest_row(
     column_map: Dict[str, str],
     started_at_ts: float,
 ) -> Optional[sqlite3.Row]:
-    timestamp_keys = [
-        "finishedat",
-        "finished_at",
-        "endedat",
-        "ended_at",
-        "completedat",
-        "completed_at",
-        "updatedat",
-        "updated_at",
-        "ended",
-        "endtime",
-        "end_time",
-        "createdat",
-        "created_at",
-        "startedat",
-        "started_at",
-    ]
+    timestamp_keys = ["end_time"]
     timestamp_cols = [column_map[key] for key in timestamp_keys if key in column_map]
     best_row = None
     best_ts = None
@@ -2561,7 +2523,7 @@ def _pick_latest_row(
     return best_row
 
 def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
-    end_time_keys = ["endtime", "end_time", "end"]
+    end_time_keys = ["end_time"]
     for key in end_time_keys:
         col = column_map.get(key)
         if not col:

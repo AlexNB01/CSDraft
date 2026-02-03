@@ -14,6 +14,10 @@ A simple Discord bot for organizing CS2 inhouse matches with:
 - Pick turn breakdowns with average pick round stats
 - Elo ratings with leaderboards
 - Winrate comparisons between players
+- Map veto flow with auto-bans and side selection
+- Map play counts
+- SteamID64 linking for MatchZy integration
+- MatchZy-driven CS match stats (kills, deaths, ADR, rating)
 - Optional automatic voice channel moves
 - Opt-out controls for captain selection
 
@@ -47,6 +51,7 @@ Key settings in `main.py`:
 QUEUE_SIZE = 10                    # Players needed for a draft
 READYCHECK_SECONDS = 120           # Readycheck timeout (2 minutes)
 PICK_TIMEOUT_SECONDS = 45          # Captain pick timeout
+MAP_VETO_TIMEOUT_SECONDS = 30      # Map veto timeout
 AUTO_VOICE_CHANNELS = True         # Enable automatic voice channel moves
 EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 ```
@@ -64,9 +69,12 @@ CS2_MATCH_CONFIG_DIR=./match_configs
 CS2_MATCH_CONFIG_TARGET_DIR=C:\CSServer\game\csgo\addons\counterstrikesharp\plugins\MatchZy\match_configs
 CS2_MATCH_CONFIG_RCON_DIR=addons/counterstrikesharp/plugins/MatchZy/match_configs
 CS2_MATCH_CONFIG_URL_BASE=http://127.0.0.1:8080/match_configs
+CS2_MATCH_CONFIG_EXTRA_JSON=
 CS2_MATCH_PLUGIN_START_CMD=matchzy_loadmatch
 CS2_MATCH_PLUGIN_START_CMDS=matchzy_loadmatch
+CS2_SERVER_CONNECT_ADDR=127.0.0.1:27015
 CS2_MATCH_RESULTS_DB=C:\CSServer\server\game\csgo\addons\counterstrikesharp\plugins\MatchZy\matchzy.db
+CS2_MATCH_RESULTS_POLL_SECONDS=5
 ```
 
 - `CS2_MATCH_CONFIG_TARGET_DIR` copies the generated JSON into your MatchZy config folder.
@@ -75,6 +83,9 @@ CS2_MATCH_RESULTS_DB=C:\CSServer\server\game\csgo\addons\counterstrikesharp\plug
 - If `CS2_MATCH_CONFIG_RCON_DIR` is empty and the target path contains `csgo/`, the bot will auto-derive the relative RCON path.
 - `CS2_MATCH_PLUGIN_START_CMDS` allows the bot to try multiple MatchZy commands until one works (comma-separated).
 - `CS2_MATCH_RESULTS_DB` points at MatchZy's SQLite database so the bot can detect finished matches.
+- `CS2_MATCH_CONFIG_EXTRA_JSON` lets you add raw JSON to the generated MatchZy config (merged into the payload).
+- `CS2_SERVER_CONNECT_ADDR` appends a handy `connect` command in the post-draft message.
+- `CS2_MATCH_RESULTS_POLL_SECONDS` controls how frequently the bot polls MatchZy results.
 
 ## Commands
 
@@ -91,6 +102,7 @@ CS2_MATCH_RESULTS_DB=C:\CSServer\server\game\csgo\addons\counterstrikesharp\plug
 | `/elo [user]` | `!elo` | View Elo rating and ranking |
 | `/dstatus` | `!dstatus` | Check current queue/draft status |
 | `/pick <number>` | `!pick`, `!p` | Captain: Pick a player by number |
+| `/link <steamid64>` | `!link` | Link your SteamID64 for MatchZy integration |
 | `/nocaptain` | `!nocaptain` | Opt out of being randomly selected as captain |
 | `/allowcaptain` | `!allowcaptain` | Re-allow captain selection |
 
@@ -101,9 +113,11 @@ CS2_MATCH_RESULTS_DB=C:\CSServer\server\game\csgo\addons\counterstrikesharp\plug
 | `/top10` | Players with most games |
 | `/topelo` | Top 10 Elo rankings |
 | `/winners` | Players with most wins (sorted by win rate) |
+| `/losers` | Players with most losses (sorted by win rate) |
 | `/captains` | Players who've captained most |
 | `/thinkids` | Players picked first most often |
 | `/fatkids` | Players picked last most often |
+| `/maps` | Map play counts |
 
 ### Admin Commands
 
@@ -114,6 +128,14 @@ CS2_MATCH_RESULTS_DB=C:\CSServer\server\game\csgo\addons\counterstrikesharp\plug
 | `/reset` | Clear queue and draft state (requires Manage Server) |
 | `/recalcelo` | Recalculate Elo from all recorded games |
 | `/filltest` | Fill queue with test players (dev only) |
+
+### Prefix-only Commands
+
+| Command | Description |
+|---------|-------------|
+| `!unlink` | Remove your linked SteamID |
+| `!mysteam` | DM your linked SteamID |
+| `!csstats [user]` | Show MatchZy-derived CS stats (kills, deaths, ADR, rating, most played map) |
 
 ## Flow for queue
 
@@ -135,15 +157,22 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 - Each captain has 45 seconds per pick (auto-pick if timeout)
 - Last player automatically assigned to Team 1
 
-### 4. Game Time
+### 4. Map Veto + Side Selection
+
+- Captains alternate banning maps from the map pool until one remains
+- Each ban has a 30 second timer (auto-ban if timeout)
+- The captain who *did not* make the final ban picks starting side (CT/T)
+
+### 5. Game Time
 
 - Teams are displayed in an embed
 - If enabled, players are automatically moved to team voice channels after 15 seconds
 - Game ID is generated for stat tracking
 
-### 5. Post-Game
+### 6. Post-Game
 
-- Typically captain sets winner with `/setwinner <game_id> <1|2>` or `/setdraw <game_id>`
+- Match result is pulled from the MatchZy database and the winner is set automatically
+- Bot posts the result, Elo changes, and team stat embeds
 - Stats are updated automatically
 - Players moved back to lobby voice channel after 15 seconds
 
@@ -167,6 +196,7 @@ The bot uses SQLite with the following tables:
 - `guild_id` - Discord server ID
 - `team1` - JSON array of Team 1 user IDs
 - `team2` - JSON array of Team 2 user IDs
+- `map` - Selected map name
 - `winner` - 1, 2, 0 (draw), or NULL (unset)
 - `created_at` - Timestamp
 
@@ -189,6 +219,27 @@ The bot uses SQLite with the following tables:
 
 - `user_id` - Discord user ID (primary key)
 
+### steam_links
+
+- `discord_user_id` - Discord user ID (primary key)
+- `steamid64` - SteamID64 (unique)
+- `linked_at` - Timestamp
+
+### match_player_stats
+
+- `game_id` - Game ID
+- `user_id` - Discord user ID
+- `steamid64` - SteamID64
+- `kills` - Total kills
+- `deaths` - Total deaths
+- `assists` - Total assists
+- `damage` - Total damage dealt
+- `rounds` - Rounds played
+- `adr` - Average damage per round
+- `kd` - Kill/death ratio
+- `rating` - Match rating
+- `created_at` - Timestamp
+
 Database file: `draftbot.sqlite3`
 Backups: `backups/` directory (last 10 kept)
 
@@ -200,6 +251,7 @@ Elo ratings are calculated per match using the team average ratings, then applie
 - **Expected score:** `1 / (1 + 10^((team_b_avg - team_a_avg) / 400))`
 - **Delta:** `BASE_MATCH_DELTA * (score - expected)` where score is 1.0 for a win, 0.0 for a loss, and 0.5 for a draw
 - **Caps:** win/loss deltas are clamped to ±30; draw deltas are clamped to ±5
+- **Performance modifier:** player MatchZy rating adds a small bonus/penalty (±5) on top of the base delta
 - **Tracking:** every rating change is saved to `rating_history` with pre/post ratings and the delta
 
 ### Testing Mode

@@ -3004,9 +3004,9 @@ async def _build_elo_change_report(
             if uid not in rating_history:
                 continue
             name = await get_display_name(interaction, uid)
-            _pre, _post, delta = rating_history[uid]
+            _pre, post, delta = rating_history[uid]
             sign = "+" if delta >= 0 else ""
-            lines.append(f"{name:<16} {sign}{delta:.1f}")
+            lines.append(f"{name:<16} {sign}{delta:.1f} ({post:.1f})")
         return lines
 
     team1_lines = await build_team_lines(team1)

@@ -2532,36 +2532,6 @@ def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
         if value in (None, ""):
             return False
         return True
-
-    flag_keys = [
-        "finished",
-        "isfinished",
-        "is_finished",
-        "completed",
-        "iscompleted",
-        "is_completed",
-        "ended",
-        "isended",
-        "is_ended",
-    ]
-    for key in flag_keys:
-        col = column_map.get(key)
-        if not col:
-            continue
-        value = row[col]
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            return value.lower() in {"1", "true", "yes", "finished", "completed", "ended"}
-    status_keys = ["status", "state", "matchstate", "match_state"]
-    for key in status_keys:
-        col = column_map.get(key)
-        if not col:
-            continue
-        value = row[col]
-        if isinstance(value, str):
-            lowered = value.lower()
-            return lowered in {"finished", "completed", "ended", "done"}
     return True
 
 def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:

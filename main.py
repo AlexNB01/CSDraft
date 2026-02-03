@@ -31,7 +31,7 @@ QUEUE_SIZE = 10
 READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
-MAP_VETO_TIMEOUT_SECONDS = 45
+MAP_VETO_TIMEOUT_SECONDS = 30
 AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
 TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
@@ -46,10 +46,9 @@ CS2_MATCH_CONFIG_URL_BASE = os.getenv("CS2_MATCH_CONFIG_URL_BASE", "")
 CS2_MATCH_CONFIG_FORMAT = os.getenv("CS2_MATCH_CONFIG_FORMAT", "matchzy")
 CS2_MATCH_CONFIG_EXTRA_JSON = os.getenv("CS2_MATCH_CONFIG_EXTRA_JSON", "")
 CS2_MATCH_PLUGIN_START_CMD = os.getenv("CS2_MATCH_PLUGIN_START_CMD", "matchzy_loadmatch")
-CS2_MATCH_PLUGIN_START_CMDS = os.getenv("CS2_MATCH_PLUGIN_START_CMDS", "")
 CS2_SERVER_CONNECT_ADDR = os.getenv("CS2_SERVER_CONNECT_ADDR", "")
 CS2_MATCH_RESULTS_DB = os.getenv("CS2_MATCH_RESULTS_DB", "")
-CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "15"))
+CS2_MATCH_RESULTS_POLL_SECONDS = int(os.getenv("CS2_MATCH_RESULTS_POLL_SECONDS", "5"))
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -67,6 +66,20 @@ MAP_POOL = [
     "de_nuke",
     "de_overpass",
 ]
+
+def format_map_name(map_name: str) -> str:
+    if not map_name:
+        return map_name
+    cleaned = map_name
+    if cleaned.startswith("de_"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.replace("_", " ")
+    return cleaned.title()
+
+def format_map_list(map_names: List[str]) -> str:
+    if not map_names:
+        return "—"
+    return ", ".join(format_map_name(name) for name in map_names)
 
 # ---- Elo settings ----
 INITIAL_RATING = 1000.0
@@ -1405,7 +1418,7 @@ class MapVetoButton(discord.ui.Button):
     def __init__(self, map_name: str, row: int):
         super().__init__(
             style=discord.ButtonStyle.secondary,
-            label=map_name,
+            label=format_map_name(map_name),
             row=row,
             custom_id=f"map_veto_{map_name}",
         )
@@ -1751,15 +1764,15 @@ async def announce_next_veto(interaction: discord.Interaction, st: DraftState, p
         head += "\n"
 
     remaining = remaining_maps(st)
-    remaining_text = ", ".join(remaining) if remaining else "—"
-    banned_text = ", ".join(st.banned_maps) if st.banned_maps else "—"
+    remaining_text = format_map_list(remaining)
+    banned_text = format_map_list(st.banned_maps)
     content = (
         f"{head}"
         f"**Map veto**\n"
         f"Vuoro: {mention(captain)} ({team_label})\n"
         f"Jäljellä: {remaining_text}\n"
         f"Bannatut: {banned_text}\n"
-        f"Klikkaa karttaa banataksesi."
+        f"Klikkaa karttaa bannataksesi."
     )
     view = await build_veto_view(st)
 
@@ -1807,9 +1820,10 @@ async def _apply_veto(interaction: discord.Interaction, st: DraftState, map_name
         await _finish_map_veto(interaction, st, remaining[0] if remaining else None)
         return
 
-    prefix = f"Kartta **{map_name}** bannattu."
+    map_label = format_map_name(map_name)
+    prefix = f"Kartta **{map_label}** bannattu."
     if is_autoban:
-        prefix = f"Aikaraja! Kartta **{map_name}** bannattu automaattisesti."
+        prefix = f"Aikaraja! Kartta **{map_label}** bannattu automaattisesti."
     await announce_next_veto(interaction, st, prefix=prefix)
 
 async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, selected_map: Optional[str]):
@@ -1824,7 +1838,7 @@ async def _finish_map_veto(interaction: discord.Interaction, st: DraftState, sel
     if st.game_id:
         await bot.db.set_game_map(st.game_id, selected_map)
 
-    await interaction.followup.send(f"**Kartta valittu:** {selected_map}")
+    await interaction.followup.send(f"**Kartta valittu:** {format_map_name(selected_map)}")
     if st.veto_index > 0 and st.captains:
         last_team = st.veto_order[st.veto_index - 1] if st.veto_order else None
         chooser_team = "team1" if last_team == "team2" else "team2"
@@ -1944,7 +1958,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
 
         if AUTO_VOICE_CHANNELS:
             countdown_msg = await interaction.followup.send(
-                "Pelaajat siirretään voice-kanaville **15s** kuluttua…"
+                "Pelaajat siirretään voice-kanaville **5s** kuluttua…"
             )
             asyncio.create_task(
                 voice_move_countdown(
@@ -2062,14 +2076,14 @@ async def voice_move_countdown(
         if interaction.channel:
             try:
                 msg = await interaction.channel.send(
-                    "🎧 Pelaajat siirretään voice-kanaville **15s** kuluttua…"
+                    "🎧 Pelaajat siirretään voice-kanaville **5s** kuluttua…"
                 )
             except discord.HTTPException:
                 return
         else:
             return
 
-    seconds = 15
+    seconds = 5
     try:
         for remaining in range(seconds, 0, -1):
             try:
@@ -2282,9 +2296,9 @@ def _build_match_config(
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"match_{guild_id}_{game_id}_{timestamp}.json"
     config_format = (CS2_MATCH_CONFIG_FORMAT or "matchzy").strip().lower()
-    start_cmds = f"{CS2_MATCH_PLUGIN_START_CMD},{CS2_MATCH_PLUGIN_START_CMDS}".lower()
     if config_format == "legacy" and (
-        "matchzy_loadmatch" in start_cmds or "matchzy_loadmatch_url" in start_cmds
+        "matchzy_loadmatch" in CS2_MATCH_PLUGIN_START_CMD.lower()
+        or "matchzy_loadmatch_url" in CS2_MATCH_PLUGIN_START_CMD.lower()
     ):
         config_format = "matchzy"
     if config_format == "legacy":
@@ -2334,9 +2348,6 @@ def _load_match_config_extras() -> dict:
     return payload
 
 def _match_start_cmds() -> List[str]:
-    if CS2_MATCH_PLUGIN_START_CMDS.strip():
-        cmds = [cmd.strip() for cmd in CS2_MATCH_PLUGIN_START_CMDS.split(",") if cmd.strip()]
-        return list(dict.fromkeys(cmds))
     return [CS2_MATCH_PLUGIN_START_CMD]
 
 def _write_match_config(path: str, data: dict) -> None:
@@ -2361,7 +2372,7 @@ def _rcon_start_match(rcon: "SourceRCON", config_filename: str) -> None:
             continue
         return
     raise ConnectionError(
-        "MatchZy-käynnistys epäonnistui. Tarkista CS2_MATCH_PLUGIN_START_CMD/CMDS."
+        "MatchZy-käynnistys epäonnistui. Tarkista CS2_MATCH_PLUGIN_START_CMD."
         f" Viimeisin vastaus: {last_response}"
     )
 
@@ -2687,49 +2698,11 @@ def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, 
                 pass
     return None
 
-def _scan_match_results_dir(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
-    if not CS2_MATCH_RESULTS_DIR:
-        return None
-    if not os.path.isdir(CS2_MATCH_RESULTS_DIR):
-        return None
-    for entry in os.scandir(CS2_MATCH_RESULTS_DIR):
-        if not entry.is_file() or not entry.name.endswith(".json"):
-            continue
-        try:
-            if entry.stat().st_mtime < started_at_ts:
-                continue
-        except FileNotFoundError:
-            continue
-        try:
-            with open(entry.path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        match_id = _extract_match_id(payload)
-        if match_id and match_id != str(game_id):
-            continue
-        if not match_id and str(game_id) not in entry.name:
-            continue
-        score_pair = _extract_score_pair(payload)
-        winner = _extract_winner(payload)
-        if winner is None and score_pair:
-            score1, score2 = score_pair
-            if score1 == score2:
-                winner = 0
-            else:
-                winner = 1 if score1 > score2 else 2
-        if winner is None:
-            continue
-        return winner, score_pair
-    return None
-
 def _scan_match_results(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
     result = _scan_matchzy_db(game_id, started_at_ts)
     if result:
         return result
-    return _scan_match_results_dir(game_id, started_at_ts)
+    return None
 
 def _row_value(row: dict, key: str, default: int = 0) -> int:
     value = row.get(key)
@@ -2973,14 +2946,14 @@ async def _attach_display_names(
             entry["display_name"] = entry.get("name") or str(entry["user_id"])
 
 def _format_match_stats_lines(stats: List[dict]) -> str:
-    header = "Name           K/A/D   K/D   ADR  RTG"
-    lines = [header]
+    header = f"{'Player':<18}  {'K':>2}  {'A':>2}  {'D':>2}   {'K/D':>4}  {'ADR':>5}  {'RTG':>4}"
+    lines = [header, "-" * len(header)]
     for entry in stats:
         name = entry.get("display_name") or entry.get("name") or str(entry["user_id"])
-        name = name[:12]
-        kad = f"{entry['kills']}/{entry['assists']}/{entry['deaths']}"
+        name = name[:18]
         lines.append(
-            f"{name:<12} {kad:<7} {entry['kd']:.2f} {entry['adr']:.1f} {entry['rating']:.2f}"
+            f"{name:<18}  {entry['kills']:>2}  {entry['assists']:>2}  {entry['deaths']:>2}   "
+            f"{entry['kd']:>4.2f}  {entry['adr']:>5.1f}  {entry['rating']:>4.2f}"
         )
     return "```\n" + "\n".join(lines) + "\n```"
 
@@ -2993,6 +2966,39 @@ def _build_match_stats_embed(title: str, stats: List[dict]) -> discord.Embed:
     )
     emb.set_footer(text=EMBED_FOOTER_TEXT)
     return emb
+
+async def _build_elo_change_report(
+    interaction: discord.Interaction,
+    game_id: int,
+    team1: List[int],
+    team2: List[int],
+) -> Optional[str]:
+    rating_history = await bot.db.get_rating_history_for_game(game_id)
+    if not rating_history:
+        return None
+
+    async def build_team_lines(team_ids: List[int]) -> List[str]:
+        lines: List[str] = []
+        for uid in team_ids:
+            if uid not in rating_history:
+                continue
+            name = await get_display_name(interaction, uid)
+            _pre, _post, delta = rating_history[uid]
+            sign = "+" if delta >= 0 else ""
+            lines.append(f"{name:<16} {sign}{delta:.1f}")
+        return lines
+
+    team1_lines = await build_team_lines(team1)
+    team2_lines = await build_team_lines(team2)
+
+    def block(lines: List[str]) -> str:
+        return "```\n" + ("\n".join(lines) if lines else "—") + "\n```"
+
+    return (
+        "Elo-muutokset:\n"
+        f"Team 1:\n{block(team1_lines)}\n"
+        f"Team 2:\n{block(team2_lines)}"
+    )
 
 async def watch_match_results(
     interaction: discord.Interaction,
@@ -3049,6 +3055,9 @@ async def watch_match_results(
                 await interaction.channel.send(
                     f"Peli `{game_id}` päättyi. {outcome_text}{score_text}."
                 )
+                elo_report = await _build_elo_change_report(interaction, game_id, team1, team2)
+                if elo_report:
+                    await interaction.channel.send(elo_report)
                 if match_stats:
                     team1_stats = [s for s in match_stats if s["user_id"] in team1]
                     team2_stats = [s for s in match_stats if s["user_id"] in team2]
@@ -3146,9 +3155,11 @@ async def start_server_orchestration(interaction: discord.Interaction, st: Draft
             watch_match_results(interaction, st, st.game_id, started_at_ts)
         )
 
-    connect_line = f"\nYhdistä: `{CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
+    connect_line = (
+        f"\nYhdistä: `connect {CS2_SERVER_CONNECT_ADDR}`" if CS2_SERVER_CONNECT_ADDR else ""
+    )
     await interaction.followup.send(
-        f"Kartta: **{st.selected_map}**\n"
+        f"Kartta: **{format_map_name(st.selected_map)}**\n"
         f"Puolet: Team 1 **{st.team1_side}** / Team 2 **{st.team2_side}**"
         f"{connect_line}"
     )
@@ -3583,33 +3594,12 @@ async def setwinner_cmd(interaction: discord.Interaction, game_id: int, winner: 
         elif winner in (1, 2):
             team1, team2 = await bot.db.set_winner(game_id, winner, overwrite=overwrite)
             msg_text = f"Voittaja (team {winner}) tallennettu pelille `{game_id}`."
-
-            rating_history = await bot.db.get_rating_history_for_game(game_id)
-            if rating_history:
-                async def build_team_changes(team_ids: List[int]) -> Tuple[str, float]:
-                    parts = []
-                    team_delta: Optional[float] = None
-                    for uid in team_ids:
-                        if uid not in rating_history:
-                            continue
-                        name = await get_display_name(interaction, uid)
-                        _pre, post, delta = rating_history[uid]
-                        if team_delta is None:
-                            team_delta = round(delta, 1)
-                        parts.append(f"{name} ({int(round(post))})")
-                    return (", ".join(parts) if parts else "—", team_delta or 0.0)
-
-                team1_changes, team1_delta = await build_team_changes(team1)
-                team2_changes, team2_delta = await build_team_changes(team2)
-                team1_sign = "+" if team1_delta >= 0 else ""
-                team2_sign = "+" if team2_delta >= 0 else ""
-                msg_text += (
-                    "\nElo-muutokset:"
-                    f"\nTeam 1 ({team1_sign}{team1_delta:.1f}): {team1_changes}"
-                    f"\nTeam 2 ({team2_sign}{team2_delta:.1f}): {team2_changes}"
-                )
         else:
             return await interaction.response.send_message("Voittajan tulee olla 0, 1 tai 2.", ephemeral=True)
+
+        elo_report = await _build_elo_change_report(interaction, game_id, team1, team2)
+        if elo_report:
+            msg_text += f"\n{elo_report}"
 
         # Lähetetään tulosviesti
         await interaction.response.send_message(msg_text)
@@ -3804,8 +3794,9 @@ async def send_head_to_head_summary(
         lines = []
         for i, (opponent_id, wins, losses, draws, games, wr) in enumerate(items, start=1):
             name = await get_display_name(interaction, opponent_id)
+            wr_suffix = " WR" if i == 1 else ""
             lines.append(
-                f"{i}. {name} — {wr:.1f}% (W {wins} / L {losses} / D {draws}, {games} peliä)"
+                f"{i}. {name} — {wr:.1f}%{wr_suffix} (W {wins} / L {losses} / D {draws}, {games} peliä)"
             )
         return "\n".join(lines) if lines else "—"
 
@@ -3967,10 +3958,10 @@ async def winners_cmd(interaction: discord.Interaction):
     rows.sort(key=lambda r: (-r[1], -r[3], r[0].lower()))
 
     top = rows[:10]
-    lines = [
-        f"{i}. {name} / {wins} ({wr:.1f}%)"
-        for i, (name, wins, games, wr) in enumerate(top, start=1)
-    ]
+    lines = []
+    for i, (name, wins, games, wr) in enumerate(top, start=1):
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {wins} ({wr:.1f}%{wr_suffix})")
 
     embed = discord.Embed(
         title="Eniten pelejä voittaneet (Top 10)",
@@ -3981,12 +3972,50 @@ async def winners_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="losers", description="Näytä eniten pelejä hävinneet pelaajat (Top 10)")
+async def losers_cmd(interaction: discord.Interaction):
+    async with aiosqlite.connect(bot.db.path) as db:
+        cur = await db.execute("SELECT user_id, wins, games_played FROM players")
+        players = await cur.fetchall()
+
+    if not players:
+        await interaction.response.send_message("Tietokannassa ei ole vielä pelaajia.", ephemeral=True)
+        return
+
+    draw_map = await bot.db.get_draws_for_users([uid for uid, _, _ in players])
+    rows = []
+    for uid, wins, games in players:
+        draws = draw_map.get(uid, 0)
+        losses = max(0, games - wins - draws)
+        wr = ((wins + draws * 0.5) / games * 100.0) if games > 0 else 0.0
+        name = await get_display_name(interaction, uid)
+        rows.append((name, losses, wr))
+
+    rows.sort(key=lambda r: (-r[1], r[2], r[0].lower()))
+
+    top = rows[:10]
+    lines = []
+    for i, (name, losses, wr) in enumerate(top, start=1):
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {losses} ({wr:.1f}%{wr_suffix})")
+
+    embed = discord.Embed(
+        title="Eniten pelejä hävinneet (Top 10)",
+        description="\n".join(lines),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text="CSDraft by Alex")
+
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="maps", description="Näytä karttojen peluumäärät")
 async def maps_cmd(interaction: discord.Interaction):
     counts = await bot.db.get_map_counts()
-    lines = [f"{map_name}: {counts.get(map_name, 0)}" for map_name in MAP_POOL]
-    extra_maps = sorted(name for name in counts.keys() if name not in MAP_POOL)
-    lines.extend(f"{map_name}: {counts.get(map_name, 0)}" for map_name in extra_maps)
+    all_maps = sorted(
+        set(MAP_POOL).union(counts.keys()),
+        key=lambda name: (-counts.get(name, 0), format_map_name(name)),
+    )
+    lines = [f"{format_map_name(map_name)}: {counts.get(map_name, 0)}" for map_name in all_maps]
     embed = discord.Embed(
         title="Karttojen peluumäärät",
         color=EMBED_COLOR_PRIMARY,
@@ -4009,7 +4038,8 @@ async def captains_cmd(interaction: discord.Interaction):
     for i, (uid, count, wins) in enumerate(rows, start=1):
         name = await get_display_name(interaction, uid)
         winrate = (wins / count * 100.0) if count > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%)")
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {count} ({winrate:.1f}%{wr_suffix})")
 
     emb = discord.Embed(title="Eniten kapteenina toimineet (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4031,7 +4061,8 @@ async def thinkids_cmd(interaction: discord.Interaction):
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}%{wr_suffix})")
 
     emb = discord.Embed(title="Eniten valittu ensimmäisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4053,7 +4084,8 @@ async def fatkids_cmd(interaction: discord.Interaction):
         stats = winrate_map.get(uid, {"games": 0, "wins": 0, "draws": 0})
         games = stats["games"]
         wr = ((stats["wins"] + stats["draws"] * 0.5) / games * 100.0) if games > 0 else 0.0
-        lines.append(f"{i}. {name} / {count} ({wr:.1f}%)")
+        wr_suffix = " WR" if i == 1 else ""
+        lines.append(f"{i}. {name} / {count} ({wr:.1f}%{wr_suffix})")
 
     emb = discord.Embed(title="Eniten valittu viimeisenä (Top 10)", color=EMBED_COLOR_PRIMARY, description="\n".join(lines))
     emb.set_footer(text=EMBED_FOOTER_TEXT)
@@ -4289,6 +4321,11 @@ async def winners_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await winners_cmd.callback(interaction)
 
+@bot.command(name="losers")
+async def losers_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await losers_cmd.callback(interaction)
+
 @bot.command(name="maps")
 async def maps_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
@@ -4361,21 +4398,21 @@ async def csstats_bang(ctx: commands.Context, *, target: Optional[str] = None):
     )
     emb.add_field(name="Pelit", value=str(games), inline=False)
     emb.add_field(
-        name="Keskiarvot (K/D = total kills / max(1, total deaths))",
+        name="Keskiarvot",
         value=(
-            f"**Kills/match:** {avg_kills:.1f}\n"
+            f"**Kills:** {round(avg_kills)}\n"
             f"**K/D:** {avg_kd:.2f}\n"
-            f"**ADR:** {avg_adr:.1f}\n"
+            f"**ADR:** {round(avg_adr)}\n"
             f"**Rating:** {avg_rating:.2f}"
         ),
         inline=False,
     )
     emb.add_field(
-        name="Ennätykset (single-match max)",
+        name="Ennätykset",
         value=(
             f"**Kills:** {max_kills}\n"
             f"**K/D:** {max_kd:.2f}\n"
-            f"**ADR:** {max_adr:.1f}\n"
+            f"**ADR:** {round(max_adr)}\n"
             f"**Rating:** {max_rating:.2f}"
         ),
         inline=False,

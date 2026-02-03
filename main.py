@@ -3387,7 +3387,7 @@ async def add_cmd(interaction: discord.Interaction):
     steamid64 = await bot.db.get_steamid(uid)
     if not steamid64:
         return await interaction.response.send_message(
-            "Et ole linkannut SteamID:tä. Lisää se komennolla **/link <steamid64>** tai **!link <steamid64>**.",
+            "Et ole linkannut SteamID:tä. Lisää se komennolla **/link <id>** tai **!link <id>**. Steam -> Profile -> oikeaklikkaa profiilisi sisällä -> Copy Page URL",
             ephemeral=True,
         )
     st.queue.append(uid)

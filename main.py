@@ -2784,7 +2784,7 @@ def _compute_match_ratings(stats: List[dict], rounds: int) -> None:
 
     for entry, zk, za, zm, zb, zd in zip(stats, z_kpr, z_adr, z_mkpr, z_apr, z_dpr):
         score = 0.34 * zk + 0.34 * za + 0.16 * zm + 0.10 * zb - 0.14 * zd
-        rating = _clip(1.0 + 0.20 * score, 0.0, 2.0)
+        rating = _clip(1.0 + 0.30 * score, 0.0, 2.0)
         entry["rating"] = rating
 
 def _fetch_matchzy_score_pair(game_id: int) -> Optional[Tuple[int, int]]:
@@ -2981,7 +2981,7 @@ def _format_match_stats_lines(stats: List[dict]) -> str:
 def _build_match_stats_embed(title: str, stats: List[dict]) -> discord.Embed:
     emb = discord.Embed(title=title, color=EMBED_COLOR_PRIMARY)
     emb.add_field(
-        name="K/A/D · K/D · ADR · Rating",
+        name="\u200b",
         value=_format_match_stats_lines(stats),
         inline=False,
     )

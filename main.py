@@ -2489,8 +2489,10 @@ def _pick_latest_row(
     column_map: Dict[str, str],
     started_at_ts: float,
 ) -> Optional[sqlite3.Row]:
-    timestamp_keys = ["end_time"]
+    timestamp_keys = [_normalize_identifier("end_time")]
     timestamp_cols = [column_map[key] for key in timestamp_keys if key in column_map]
+    if not timestamp_cols:
+        return None
     best_row = None
     best_ts = None
 
@@ -2518,12 +2520,10 @@ def _pick_latest_row(
             best_ts = row_ts
             best_row = row
 
-    if best_row is None and rows:
-        return rows[-1]
     return best_row
 
 def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
-    end_time_keys = ["end_time"]
+    end_time_keys = [_normalize_identifier("end_time")]
     for key in end_time_keys:
         col = column_map.get(key)
         if not col:
@@ -2532,7 +2532,7 @@ def _row_is_finished(row: sqlite3.Row, column_map: Dict[str, str]) -> bool:
         if value in (None, ""):
             return False
         return True
-    return True
+    return False
 
 def _scan_matchzy_db(game_id: int, started_at_ts: float) -> Optional[Tuple[int, Optional[Tuple[int, int]]]]:
     if not CS2_MATCH_RESULTS_DB:

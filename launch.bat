@@ -14,7 +14,7 @@ call .venv\Scripts\activate.bat
 
 REM Asennetaan tarvittavat kirjastot
 echo [*] Asennetaan riippuvuudet :3
-pip install -U discord.py aiosqlite python-dotenv >nul
+pip install -U discord.py aiosqlite python-dotenv matplotlib >nul
 
 echo.
 echo [*] Kaynnistetaan Discord Draft Bot... :3

@@ -74,9 +74,29 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/top10` | Players with most games |
 | `/topelo` | Top 10 Elo rankings |
 | `/winners` | Players with most wins (sorted by win rate) |
+| `/losers` | Players with most losses |
 | `/captains` | Players who've captained most |
 | `/thinkids` | Players picked first most often |
 | `/fatkids` | Players picked last most often |
+
+### Chart Commands
+
+Render stats as matplotlib images (requires the `matplotlib` package).
+
+| Command | Description |
+|---------|-------------|
+| `/elochart [user] [vs]` | Elo rating over time, optionally comparing two players |
+| `/winlosschart [user]` | Win/loss/draw pie chart for a player |
+| `/h2hchart <opponent> [user]` | Head-to-head win/loss/draw bar chart between two players |
+| `/elodist` | Elo rating distribution across all players |
+| `/leaderboardchart <metric>` | Top 10 leaderboard (winners/losers/elo/captains/thinkids/fatkids) as a bar chart |
+| `/activitychart [days]` | Games played per day over a time window |
+| `/deltadist` | Distribution of Elo rating swings per game |
+| `/pickwinratechart` | Community-wide win rate by draft pick position |
+| `/teambalancechart` | Cumulative Team 1 vs Team 2 wins over time |
+| `/captainwinratechart` | Captain win rate vs. overall win rate per player |
+
+Text-command form: `!chart <type> [lisätieto]`, e.g. `!chart h2h SomePlayer` or `!chart leaderboard elo`.
 
 ### Admin Commands
 

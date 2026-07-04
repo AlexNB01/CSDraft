@@ -11,6 +11,7 @@ A simple Discord bot for organizing CS2 inhouse matches with:
 
 - Automated queue, readycheck, and captain draft flow
 - Player stats tracking (wins, captain picks, first/last pick counts)
+- Pick turn breakdowns with average pick round stats
 - Elo ratings with leaderboards
 - Winrate comparisons between players
 - Optional automatic voice channel moves
@@ -60,6 +61,7 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/rm` | `!rm`, `!remove` | Leave the queue |
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
+| `/pickstats [user]` | `!pickstats` | View pick turn counts and average pick round |
 | `/winrate <user>` | `!winrate`, `!wr` | Compare your winrate against another player |
 | `/elo [user]` | `!elo` | View Elo rating and ranking |
 | `/dstatus` | `!dstatus` | Check current queue/draft status |

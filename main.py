@@ -437,6 +437,7 @@ class DB:
         team1_ids: List[int],
         team2_ids: List[int],
         result: str,
+        timestamp: Optional[str] = None,
     ) -> None:
         if result not in {"team1_win", "team2_win", "draw"}:
             raise ValueError("Tuntematon ottelutulos.")
@@ -472,7 +473,8 @@ class DB:
         else:
             score_team1 = score_team2 = 0.5
 
-        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if timestamp is None:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         async def apply_for_team(team_ids: List[int], score_team: float, expected_team: float) -> None:
             for uid in team_ids:
@@ -528,10 +530,10 @@ class DB:
                 await db.execute("DELETE FROM ratings")
 
                 cur = await db.execute(
-                    "SELECT id, team1, team2, winner FROM games WHERE winner IS NOT NULL ORDER BY created_at ASC, id ASC"
+                    "SELECT id, team1, team2, winner, created_at FROM games WHERE winner IS NOT NULL ORDER BY created_at ASC, id ASC"
                 )
                 games = await cur.fetchall()
-                for game_id, team1_raw, team2_raw, winner in games:
+                for game_id, team1_raw, team2_raw, winner, created_at in games:
                     team1 = json.loads(team1_raw)
                     team2 = json.loads(team2_raw)
                     if winner == 1:
@@ -540,7 +542,7 @@ class DB:
                         result = "team2_win"
                     else:
                         result = "draw"
-                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result)
+                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result, timestamp=created_at)
 
                 await db.commit()
                 return len(games)

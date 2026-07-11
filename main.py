@@ -37,7 +37,7 @@ EMBED_COLOR_PRIMARY = 0x29377e
 EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 
 PICK_ORDER = [
-    "team1", "team2", "team1", "team2", "team1", "team2", "team2"
+    "team1", "team2", "team2", "team1", "team1", "team2", "team2"
 ]
 
 # ---- Elo settings ----

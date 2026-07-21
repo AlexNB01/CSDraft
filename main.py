@@ -1,4 +1,5 @@
 import os
+import io
 import asyncio
 import random
 import json
@@ -14,6 +15,10 @@ import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # -----------------------------
 # Configi :3
@@ -32,7 +37,7 @@ EMBED_COLOR_PRIMARY = 0x29377e
 EMBED_FOOTER_TEXT   = "CSDraft by Alex"
 
 PICK_ORDER = [
-    "team1", "team2", "team1", "team2", "team1", "team2", "team2"
+    "team1", "team2", "team2", "team1", "team1", "team2", "team2"
 ]
 
 # ---- Elo settings ----
@@ -110,6 +115,35 @@ def format_winrate(winrate: float, show_label: bool) -> str:
     return f"{winrate:.1f}%{label}"
 
 # -----------------------------
+# Kuvaajat: matplotlib-apurit :3
+# -----------------------------
+CHART_BG_COLOR = "#2b2d31"
+CHART_FG_COLOR = "#dcddde"
+CHART_GRID_COLOR = "#4f545c"
+CHART_ACCENT1 = "#{:06x}".format(EMBED_COLOR_PRIMARY)
+CHART_ACCENT2 = "#e67e22"
+
+def new_chart_figure(figsize: Tuple[float, float] = (8, 5)):
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.patch.set_facecolor(CHART_BG_COLOR)
+    ax.set_facecolor(CHART_BG_COLOR)
+    ax.tick_params(colors=CHART_FG_COLOR)
+    ax.xaxis.label.set_color(CHART_FG_COLOR)
+    ax.yaxis.label.set_color(CHART_FG_COLOR)
+    ax.title.set_color(CHART_FG_COLOR)
+    for spine in ax.spines.values():
+        spine.set_color(CHART_GRID_COLOR)
+    ax.grid(True, color=CHART_GRID_COLOR, alpha=0.3)
+    return fig, ax
+
+def figure_to_discord_file(fig, filename: str) -> discord.File:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return discord.File(buf, filename=filename)
+
+# -----------------------------
 @dataclass
 class DraftState:
     queue: List[int] = field(default_factory=list)
@@ -179,6 +213,10 @@ CREATE TABLE IF NOT EXISTS rating_history (
 );
 
 CREATE TABLE IF NOT EXISTS captain_opt_out (
+  user_id INTEGER PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS game_bans (
   user_id INTEGER PRIMARY KEY
 );
 """
@@ -325,6 +363,21 @@ class DB:
                     )
                 await db.commit()
 
+    async def is_game_banned(self, user_id: int) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT 1 FROM game_bans WHERE user_id = ?", (user_id,))
+            row = await cur.fetchone()
+        return row is not None
+
+    async def set_game_ban(self, user_id: int, banned: bool) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                if banned:
+                    await db.execute("INSERT OR IGNORE INTO game_bans (user_id) VALUES (?)", (user_id,))
+                else:
+                    await db.execute("DELETE FROM game_bans WHERE user_id = ?", (user_id,))
+                await db.commit()
+
     async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
@@ -384,6 +437,7 @@ class DB:
         team1_ids: List[int],
         team2_ids: List[int],
         result: str,
+        timestamp: Optional[str] = None,
     ) -> None:
         if result not in {"team1_win", "team2_win", "draw"}:
             raise ValueError("Tuntematon ottelutulos.")
@@ -419,7 +473,8 @@ class DB:
         else:
             score_team1 = score_team2 = 0.5
 
-        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if timestamp is None:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         async def apply_for_team(team_ids: List[int], score_team: float, expected_team: float) -> None:
             for uid in team_ids:
@@ -475,10 +530,10 @@ class DB:
                 await db.execute("DELETE FROM ratings")
 
                 cur = await db.execute(
-                    "SELECT id, team1, team2, winner FROM games WHERE winner IS NOT NULL ORDER BY created_at ASC, id ASC"
+                    "SELECT id, team1, team2, winner, created_at FROM games WHERE winner IS NOT NULL ORDER BY created_at ASC, id ASC"
                 )
                 games = await cur.fetchall()
-                for game_id, team1_raw, team2_raw, winner in games:
+                for game_id, team1_raw, team2_raw, winner, created_at in games:
                     team1 = json.loads(team1_raw)
                     team2 = json.loads(team2_raw)
                     if winner == 1:
@@ -487,7 +542,7 @@ class DB:
                         result = "team2_win"
                     else:
                         result = "draw"
-                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result)
+                    await self._apply_ratings_for_game_tx(db, game_id, team1, team2, result, timestamp=created_at)
 
                 await db.commit()
                 return len(games)
@@ -940,6 +995,84 @@ class DB:
                     turns.append(len(pick_order) + offset)
 
         return turns
+
+    async def get_rating_history_for_user(self, user_id: int) -> List[Tuple[str, float]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT created_at, post_rating FROM rating_history WHERE user_id = ? ORDER BY created_at ASC",
+                (user_id,),
+            )
+            rows = await cur.fetchall()
+        return [(created_at, float(post_rating)) for created_at, post_rating in rows]
+
+    async def get_all_current_ratings(self) -> List[float]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT rating FROM ratings WHERE elo_games > 0")
+            rows = await cur.fetchall()
+        return [float(row[0]) for row in rows]
+
+    async def get_all_rating_deltas(self) -> List[float]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT delta FROM rating_history")
+            rows = await cur.fetchall()
+        return [float(row[0]) for row in rows]
+
+    async def get_all_games_meta(self) -> List[Tuple[str, Optional[int]]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT created_at, winner FROM games ORDER BY created_at ASC"
+            )
+            rows = await cur.fetchall()
+        return [(created_at, (int(winner) if winner is not None else None)) for created_at, winner in rows]
+
+    async def get_captain_stats_all(self) -> List[Tuple[int, int, int, int, int]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT user_id, captain_count, captain_wins, games_played, wins FROM players WHERE captain_count > 0"
+            )
+            rows = await cur.fetchall()
+        return [(int(a), int(b), int(c), int(d), int(e)) for a, b, c, d, e in rows]
+
+    async def get_winrate_by_pick_turn(self, pick_order: List[str]) -> Dict[int, Dict[str, int]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT team1, team2, winner FROM games WHERE winner IS NOT NULL")
+            rows = await cur.fetchall()
+
+        stats: Dict[int, Dict[str, int]] = {}
+
+        def bump(turn: int, team: str, winner: int) -> None:
+            entry = stats.setdefault(turn, {"games": 0, "wins": 0, "draws": 0})
+            entry["games"] += 1
+            if winner == 0:
+                entry["draws"] += 1
+            elif (team == "team1" and winner == 1) or (team == "team2" and winner == 2):
+                entry["wins"] += 1
+
+        for team1_raw, team2_raw, winner in rows:
+            team1 = json.loads(team1_raw)
+            team2 = json.loads(team2_raw)
+            team1_picks = team1[1:] if len(team1) > 1 else []
+            team2_picks = team2[1:] if len(team2) > 1 else []
+            idx1 = idx2 = 0
+
+            for turn, team in enumerate(pick_order, start=1):
+                if team == "team1":
+                    if idx1 >= len(team1_picks):
+                        continue
+                    idx1 += 1
+                else:
+                    if idx2 >= len(team2_picks):
+                        continue
+                    idx2 += 1
+                bump(turn, team, winner)
+
+            leftover_turn = len(pick_order) + 1
+            for _ in team1_picks[idx1:]:
+                bump(leftover_turn, "team1", winner)
+            for _ in team2_picks[idx2:]:
+                bump(leftover_turn, "team2", winner)
+
+        return stats
 
 # -----------------------------
 # Bot :3
@@ -1788,15 +1921,15 @@ class InteractionShim:
         self.channel = ctx.channel
 
         class _Resp:
-            async def send_message(_, content=None, *, embed=None, ephemeral=False, view=None):
-                return await ctx.reply(content or "", embed=embed, view=view)
+            async def send_message(_, content=None, *, embed=None, ephemeral=False, view=None, file=None):
+                return await ctx.reply(content or "", embed=embed, view=view, file=file)
 
             async def defer(_, thinking=False):
                 pass
 
         class _Follow:
-            async def send(_, content=None, *, embed=None, ephemeral=False, view=None):
-                return await ctx.send(content or "", embed=embed, view=view)
+            async def send(_, content=None, *, embed=None, ephemeral=False, view=None, file=None):
+                return await ctx.send(content or "", embed=embed, view=view, file=file)
 
         self.response = _Resp()
         self.followup = _Follow()
@@ -1809,6 +1942,8 @@ async def add_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     st = bot.get_state(interaction.guild_id)
     uid = interaction.user.id
+    if await bot.db.is_game_banned(uid):
+        return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä jonoon.", ephemeral=True)
     if st.draft_active or st.readycheck_active:
         return await interaction.response.send_message("Draft käynnissä tai readycheck päällä – ei uusia liittymisiä.", ephemeral=True)
     if uid in st.queue:
@@ -2493,6 +2628,366 @@ async def fatkids_cmd(interaction: discord.Interaction):
     emb.set_footer(text=EMBED_FOOTER_TEXT)
     await interaction.response.send_message(embed=emb)
 
+# -----------------------------
+# Kuvaajat :3
+# -----------------------------
+LEADERBOARD_CHART_METRICS: Dict[str, str] = {
+    "winners": "Eniten voittoja",
+    "losers": "Eniten häviöitä",
+    "elo": "Top Elo",
+    "captains": "Eniten kapteenina",
+    "thinkids": "Eniten valittu ensimmäisenä",
+    "fatkids": "Eniten valittu viimeisenä",
+}
+
+async def _chart_elo(interaction: discord.Interaction, user: Optional[discord.User], opponent: Optional[discord.User]) -> discord.File:
+    target = user or interaction.user
+    history = await bot.db.get_rating_history_for_user(target.id)
+    if not history:
+        raise ValueError("Ei Elo-historiaa vielä.")
+
+    name = await get_display_name(interaction, target.id)
+    fig, ax = new_chart_figure()
+    dates = [datetime.datetime.fromisoformat(ts) for ts, _ in history]
+    ratings = [r for _, r in history]
+    ax.plot(dates, ratings, marker="o", color=CHART_ACCENT1, label=name)
+
+    if opponent is not None and opponent.id != target.id:
+        vs_history = await bot.db.get_rating_history_for_user(opponent.id)
+        if vs_history:
+            vs_name = await get_display_name(interaction, opponent.id)
+            vs_dates = [datetime.datetime.fromisoformat(ts) for ts, _ in vs_history]
+            vs_ratings = [r for _, r in vs_history]
+            ax.plot(vs_dates, vs_ratings, marker="o", color=CHART_ACCENT2, label=vs_name)
+
+    ax.set_title("Elo ajan yli")
+    ax.set_ylabel("Elo")
+    fig.autofmt_xdate()
+    ax.legend(facecolor=CHART_BG_COLOR, labelcolor=CHART_FG_COLOR)
+    return figure_to_discord_file(fig, "elochart.png")
+
+async def _chart_winloss(interaction: discord.Interaction, user: Optional[discord.User]) -> discord.File:
+    target = user or interaction.user
+    data = await bot.db.get_player(target.id)
+    if not data or data["games_played"] == 0:
+        raise ValueError("Ei pelidataa vielä.")
+
+    draws_map = await bot.db.get_draws_for_users([target.id])
+    draws = draws_map.get(target.id, 0)
+    wins = data["wins"]
+    losses = max(data["games_played"] - wins - draws, 0)
+    name = await get_display_name(interaction, target.id)
+
+    labels, values, colors = [], [], []
+    for label, value, color in (("Voitot", wins, "#2ecc71"), ("Häviöt", losses, "#e74c3c"), ("Tasapelit", draws, "#95a5a6")):
+        if value > 0:
+            labels.append(label); values.append(value); colors.append(color)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    fig.patch.set_facecolor(CHART_BG_COLOR)
+    ax.pie(values, labels=labels, colors=colors, autopct="%1.0f%%", textprops={"color": CHART_FG_COLOR})
+    ax.set_title(f"Voitot/häviöt/tasapelit: {name}", color=CHART_FG_COLOR)
+    return figure_to_discord_file(fig, "winlosschart.png")
+
+async def _chart_h2h(interaction: discord.Interaction, user: Optional[discord.User], opponent: discord.User) -> discord.File:
+    target = user or interaction.user
+    if target.id == opponent.id:
+        raise ValueError("Valitse kaksi eri pelaajaa.")
+    stats = await bot.db.get_head_to_head(target.id, opponent.id)
+    if stats["games"] == 0:
+        raise ValueError("Näiden pelaajien välillä ei ole yhteisiä pelejä.")
+
+    name = await get_display_name(interaction, target.id)
+    opp_name = await get_display_name(interaction, opponent.id)
+
+    fig, ax = new_chart_figure((6, 5))
+    labels = ["Voitot", "Häviöt", "Tasapelit"]
+    values = [stats["wins"], stats["losses"], stats["draws"]]
+    colors = ["#2ecc71", "#e74c3c", "#95a5a6"]
+    ax.bar(labels, values, color=colors)
+    ax.set_title(f"{name} vs {opp_name}")
+    ax.set_ylabel("Pelejä")
+    for i, v in enumerate(values):
+        ax.text(i, v, str(v), ha="center", va="bottom", color=CHART_FG_COLOR)
+    return figure_to_discord_file(fig, "h2hchart.png")
+
+async def _chart_elodist(interaction: discord.Interaction) -> discord.File:
+    ratings = await bot.db.get_all_current_ratings()
+    if len(ratings) < 2:
+        raise ValueError("Ei tarpeeksi dataa jakaumalle.")
+
+    fig, ax = new_chart_figure()
+    ax.hist(ratings, bins=min(15, max(5, len(ratings) // 2)), color=CHART_ACCENT1, edgecolor=CHART_BG_COLOR)
+    ax.set_title("Elo-jakauma")
+    ax.set_xlabel("Elo")
+    ax.set_ylabel("Pelaajien määrä")
+    return figure_to_discord_file(fig, "elodist.png")
+
+async def _chart_leaderboard(interaction: discord.Interaction, metric: str) -> discord.File:
+    names: List[str] = []
+    values: List[float] = []
+    title = LEADERBOARD_CHART_METRICS[metric]
+
+    if metric == "elo":
+        rows = await bot.db.get_top_ratings(10)
+        for uid, rating, _ in rows:
+            names.append(await get_display_name(interaction, uid))
+            values.append(rating)
+        xlabel = "Elo"
+    elif metric == "winners":
+        rows = await bot.db.leaderboard("wins", 10)
+        for uid, count, _, _ in rows:
+            names.append(await get_display_name(interaction, uid))
+            values.append(count)
+        xlabel = "Voitot"
+    elif metric == "losers":
+        async with aiosqlite.connect(bot.db.path) as db:
+            cur = await db.execute("SELECT user_id, wins, games_played FROM players")
+            player_rows = await cur.fetchall()
+        draw_map = await bot.db.get_draws_for_users([uid for uid, _, _ in player_rows])
+        computed = []
+        for uid, wins, games in player_rows:
+            losses = max(games - wins - draw_map.get(uid, 0), 0)
+            computed.append((uid, losses))
+        computed.sort(key=lambda r: -r[1])
+        for uid, losses in computed[:10]:
+            names.append(await get_display_name(interaction, uid))
+            values.append(losses)
+        xlabel = "Häviöt"
+    else:
+        column = {"captains": "captain_count", "thinkids": "first_pick_count", "fatkids": "last_pick_count"}[metric]
+        rows = await bot.db.leaderboard(column, 10)
+        for uid, count, _, _ in rows:
+            names.append(await get_display_name(interaction, uid))
+            values.append(count)
+        xlabel = title
+
+    if not values:
+        raise ValueError("Ei dataa vielä.")
+
+    fig, ax = new_chart_figure((9, 5))
+    ax.barh(names[::-1], values[::-1], color=CHART_ACCENT1)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    return figure_to_discord_file(fig, "leaderboardchart.png")
+
+async def _chart_activity(interaction: discord.Interaction, days: int) -> discord.File:
+    games = await bot.db.get_all_games_meta()
+    if not games:
+        raise ValueError("Ei pelidataa vielä.")
+
+    days = max(1, min(days, 365))
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+
+    counts: Dict[datetime.date, int] = {}
+    for created_at, _winner in games:
+        ts = datetime.datetime.fromisoformat(created_at)
+        if ts < cutoff:
+            continue
+        day = ts.date()
+        counts[day] = counts.get(day, 0) + 1
+
+    if not counts:
+        raise ValueError(f"Ei pelejä viimeisen {days} päivän ajalta.")
+
+    sorted_days = sorted(counts)
+    fig, ax = new_chart_figure((10, 5))
+    ax.bar(sorted_days, [counts[d] for d in sorted_days], color=CHART_ACCENT1)
+    ax.set_title(f"Pelien määrä / päivä (viim. {days} pv)")
+    ax.set_ylabel("Pelejä")
+    fig.autofmt_xdate()
+    return figure_to_discord_file(fig, "activitychart.png")
+
+async def _chart_deltadist(interaction: discord.Interaction) -> discord.File:
+    deltas = await bot.db.get_all_rating_deltas()
+    if len(deltas) < 2:
+        raise ValueError("Ei tarpeeksi dataa jakaumalle.")
+
+    fig, ax = new_chart_figure()
+    ax.hist(deltas, bins=20, color=CHART_ACCENT2, edgecolor=CHART_BG_COLOR)
+    ax.axvline(0, color=CHART_FG_COLOR, linestyle="--", linewidth=1)
+    ax.set_title("Elo-muutosten jakauma per peli")
+    ax.set_xlabel("Elo-muutos")
+    ax.set_ylabel("Määrä")
+    return figure_to_discord_file(fig, "deltadist.png")
+
+async def _chart_pickwinrate(interaction: discord.Interaction) -> discord.File:
+    stats = await bot.db.get_winrate_by_pick_turn(PICK_ORDER)
+    if not stats:
+        raise ValueError("Ei tarpeeksi pelidataa.")
+
+    turns = sorted(stats)
+    winrates = []
+    for turn in turns:
+        s = stats[turn]
+        wr = ((s["wins"] + s["draws"] * 0.5) / s["games"] * 100.0) if s["games"] > 0 else 0.0
+        winrates.append(wr)
+
+    labels = [str(t) if t <= len(PICK_ORDER) else "Viimeinen" for t in turns]
+
+    fig, ax = new_chart_figure((8, 5))
+    ax.bar(labels, winrates, color=CHART_ACCENT1)
+    ax.axhline(50, color=CHART_FG_COLOR, linestyle="--", linewidth=1)
+    ax.set_title("Winrate valintavuoron mukaan")
+    ax.set_xlabel("Valintavuoro")
+    ax.set_ylabel("Winrate %")
+    return figure_to_discord_file(fig, "pickwinratechart.png")
+
+async def _chart_teambalance(interaction: discord.Interaction) -> discord.File:
+    games = [g for g in await bot.db.get_all_games_meta() if g[1] is not None]
+    if not games:
+        raise ValueError("Ei ratkaistuja pelejä vielä.")
+
+    team1_cum, team2_cum = [], []
+    t1 = t2 = 0
+    for _created_at, winner in games:
+        if winner == 1:
+            t1 += 1
+        elif winner == 2:
+            t2 += 1
+        team1_cum.append(t1)
+        team2_cum.append(t2)
+
+    x = list(range(1, len(games) + 1))
+    fig, ax = new_chart_figure((9, 5))
+    ax.plot(x, team1_cum, color=CHART_ACCENT1, label="Team 1")
+    ax.plot(x, team2_cum, color=CHART_ACCENT2, label="Team 2")
+    ax.set_title("Team 1 vs Team 2 -voitot (kumulatiivinen)")
+    ax.set_xlabel("Peli #")
+    ax.set_ylabel("Voitot yhteensä")
+    ax.legend(facecolor=CHART_BG_COLOR, labelcolor=CHART_FG_COLOR)
+    return figure_to_discord_file(fig, "teambalancechart.png")
+
+async def _chart_captainwinrate(interaction: discord.Interaction) -> discord.File:
+    rows = await bot.db.get_captain_stats_all()
+    if not rows:
+        raise ValueError("Ei kapteenidataa vielä.")
+
+    rows.sort(key=lambda r: -r[1])
+    rows = rows[:10]
+
+    names, captain_wr, overall_wr = [], [], []
+    for uid, cap_count, cap_wins, games, wins in rows:
+        names.append(await get_display_name(interaction, uid))
+        captain_wr.append((cap_wins / cap_count * 100.0) if cap_count > 0 else 0.0)
+        overall_wr.append((wins / games * 100.0) if games > 0 else 0.0)
+
+    x = range(len(names))
+    width = 0.35
+    fig, ax = new_chart_figure((9, 5))
+    ax.bar([i - width / 2 for i in x], captain_wr, width, label="Kapteenina", color=CHART_ACCENT1)
+    ax.bar([i + width / 2 for i in x], overall_wr, width, label="Yleinen", color=CHART_ACCENT2)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(names, rotation=30, ha="right")
+    ax.set_ylabel("Winrate %")
+    ax.set_title("Kapteeni-winrate vs. yleinen winrate")
+    ax.legend(facecolor=CHART_BG_COLOR, labelcolor=CHART_FG_COLOR)
+    return figure_to_discord_file(fig, "captainwinratechart.png")
+
+@bot.tree.command(name="elochart", description="Piirrä Elo-käyrä ajan yli (voit vertailla kahta pelaajaa)")
+@app_commands.describe(user="Pelaaja (oletus: sinä)", vs="Valinnainen: toinen pelaaja vertailuun")
+async def elochart_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None, vs: Optional[discord.User] = None):
+    await interaction.response.defer()
+    try:
+        file = await _chart_elo(interaction, user, vs)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="winlosschart", description="Piirrä voitto/tappio/tasapelijakauma pelaajalle")
+@app_commands.describe(user="Valinnainen: pelaaja")
+async def winlosschart_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
+    await interaction.response.defer()
+    try:
+        file = await _chart_winloss(interaction, user)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="h2hchart", description="Piirrä head-to-head-tilasto kahden pelaajan välillä")
+@app_commands.describe(opponent="Vastustaja", user="Valinnainen: pelaaja jonka näkökulmasta (oletus: sinä)")
+async def h2hchart_cmd(interaction: discord.Interaction, opponent: discord.User, user: Optional[discord.User] = None):
+    await interaction.response.defer()
+    try:
+        file = await _chart_h2h(interaction, user, opponent)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+async def h2hchart_bang_impl(ctx: commands.Context, opponent_text: Optional[str]):
+    if not opponent_text:
+        return await ctx.reply("Anna vastustajan nimi tai ID: `!h2hchart <vastustaja>`.")
+    opponent_user = await resolve_user_from_text(ctx.guild, opponent_text)
+    if not opponent_user:
+        return await ctx.reply("En löytänyt vastustajaa annetulla nimellä tai ID:llä.")
+    await h2hchart_cmd.callback(InteractionShim(ctx), opponent_user, None)
+
+@bot.tree.command(name="elodist", description="Piirrä Elo-jakauma koko yhteisölle")
+async def elodist_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        file = await _chart_elodist(interaction)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="leaderboardchart", description="Piirrä top 10 -lista pylväskaaviona")
+@app_commands.describe(metric="Mitä tilastoa näytetään")
+@app_commands.choices(metric=[app_commands.Choice(name=v, value=k) for k, v in LEADERBOARD_CHART_METRICS.items()])
+async def leaderboardchart_cmd(interaction: discord.Interaction, metric: str):
+    await interaction.response.defer()
+    try:
+        file = await _chart_leaderboard(interaction, metric)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="activitychart", description="Piirrä pelien määrä ajan yli")
+@app_commands.describe(days="Kuinka monelta viime päivältä (oletus 30)")
+async def activitychart_cmd(interaction: discord.Interaction, days: Optional[int] = 30):
+    await interaction.response.defer()
+    try:
+        file = await _chart_activity(interaction, days or 30)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="deltadist", description="Piirrä Elo-muutosten (voitto/tappio-heilahdusten) jakauma")
+async def deltadist_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        file = await _chart_deltadist(interaction)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="pickwinratechart", description="Piirrä winrate valintavuoron mukaan (koko yhteisö)")
+async def pickwinratechart_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        file = await _chart_pickwinrate(interaction)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="teambalancechart", description="Piirrä Team1 vs Team2 -voittotasapaino ajan yli")
+async def teambalancechart_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        file = await _chart_teambalance(interaction)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
+@bot.tree.command(name="captainwinratechart", description="Vertaile kapteenina pelattua winratea yleiseen winrateen")
+async def captainwinratechart_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        file = await _chart_captainwinrate(interaction)
+    except ValueError as e:
+        return await interaction.followup.send(str(e))
+    await interaction.followup.send(file=file)
+
 @bot.tree.command(name="reset", description="Tyhjennä jono (admin)" )
 async def reset_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
@@ -2517,6 +3012,31 @@ async def nocaptain_cmd(interaction: discord.Interaction):
 async def allowcaptain_cmd(interaction: discord.Interaction):
     await bot.db.set_captain_opt_out(interaction.user.id, False)
     await interaction.response.send_message("Sinut voidaan jälleen valita kapteeniksi.", ephemeral=True)
+
+@bot.tree.command(name="pelikielto", description="Aseta/poista pelikieto itsellesi tai toiselle pelaajalle (admin)")
+async def pelikielto_cmd(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    if user is not None and user.id != interaction.user.id:
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(
+                "Vain ylläpito voi asettaa pelikiellon toiselle pelaajalle.", ephemeral=True
+            )
+        target_id = user.id
+        target_name = user.display_name
+    else:
+        target_id = interaction.user.id
+        target_name = interaction.user.display_name
+
+    banned = await bot.db.is_game_banned(target_id)
+    await bot.db.set_game_ban(target_id, not banned)
+
+    if not banned:
+        await interaction.response.send_message(
+            f"**{target_name}** on nyt pelikiellossa."
+        )
+    else:
+        await interaction.response.send_message(
+            f"**{target_name}** pelikielto on poistettu."
+        )
 
 @bot.tree.command(name="recalcelo", description="Laske Elo-pisteet uudelleen kaikista peleistä (admin)")
 async def recalcelo_cmd(interaction: discord.Interaction):
@@ -2658,7 +3178,51 @@ async def thinkids_bang(ctx: commands.Context):
 @bot.command(name="fatkids")
 async def fatkids_bang(ctx: commands.Context):
     await fatkids_cmd.callback(InteractionShim(ctx))
-    
+
+@bot.command(name="elochart")
+async def elochart_bang(ctx: commands.Context, user: Optional[discord.Member] = None, vs: Optional[discord.Member] = None):
+    await elochart_cmd.callback(InteractionShim(ctx), user, vs)
+
+@bot.command(name="winlosschart")
+async def winlosschart_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
+    await winlosschart_cmd.callback(InteractionShim(ctx), user)
+
+@bot.command(name="h2hchart")
+async def h2hchart_bang(ctx: commands.Context, *, opponent: Optional[str] = None):
+    await h2hchart_bang_impl(ctx, opponent)
+
+@bot.command(name="elodist")
+async def elodist_bang(ctx: commands.Context):
+    await elodist_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="leaderboardchart")
+async def leaderboardchart_bang(ctx: commands.Context, metric: Optional[str] = None):
+    metric = (metric or "").strip().lower()
+    if metric not in LEADERBOARD_CHART_METRICS:
+        valid = ", ".join(LEADERBOARD_CHART_METRICS)
+        return await ctx.reply(f"Käyttö: `!leaderboardchart <metric>`. Kelvolliset arvot: {valid}")
+    await leaderboardchart_cmd.callback(InteractionShim(ctx), metric)
+
+@bot.command(name="activitychart")
+async def activitychart_bang(ctx: commands.Context, days: Optional[int] = 30):
+    await activitychart_cmd.callback(InteractionShim(ctx), days)
+
+@bot.command(name="deltadist")
+async def deltadist_bang(ctx: commands.Context):
+    await deltadist_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="pickwinratechart")
+async def pickwinratechart_bang(ctx: commands.Context):
+    await pickwinratechart_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="teambalancechart")
+async def teambalancechart_bang(ctx: commands.Context):
+    await teambalancechart_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="captainwinratechart")
+async def captainwinratechart_bang(ctx: commands.Context):
+    await captainwinratechart_cmd.callback(InteractionShim(ctx))
+
 @bot.command(name="setdraw", aliases=["sd"])
 async def setdraw_bang(ctx: commands.Context, game_id: int = None):
     if game_id is None:
@@ -2685,6 +3249,10 @@ async def topelo_bang(ctx: commands.Context):
 @bot.command(name="recalcelo")
 async def recalcelo_bang(ctx: commands.Context):
     await recalcelo_cmd.callback(InteractionShim(ctx))
+
+@bot.command(name="pelikielto")
+async def pelikielto_bang(ctx: commands.Context, user: Optional[discord.Member] = None):
+    await pelikielto_cmd.callback(InteractionShim(ctx), user)
 
 # -----------------------------
 # Käynnistys :3

@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 # Configi :3
 # -----------------------------
 QUEUE_SIZE = 10
+PREMIER_QUEUE_SIZE = 5
 READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
@@ -219,6 +220,13 @@ CREATE TABLE IF NOT EXISTS captain_opt_out (
 CREATE TABLE IF NOT EXISTS game_bans (
   user_id INTEGER PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS premier_queue (
+  guild_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (guild_id, user_id)
+);
 """
 
 class DB:
@@ -376,6 +384,47 @@ class DB:
                     await db.execute("INSERT OR IGNORE INTO game_bans (user_id) VALUES (?)", (user_id,))
                 else:
                     await db.execute("DELETE FROM game_bans WHERE user_id = ?", (user_id,))
+                await db.commit()
+
+    async def premier_add(self, guild_id: int, user_id: int) -> bool:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                cur = await db.execute(
+                    "SELECT 1 FROM premier_queue WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+                if await cur.fetchone():
+                    return False
+                await db.execute(
+                    "INSERT INTO premier_queue (guild_id, user_id) VALUES (?, ?)",
+                    (guild_id, user_id),
+                )
+                await db.commit()
+                return True
+
+    async def premier_remove(self, guild_id: int, user_id: int) -> bool:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                cur = await db.execute(
+                    "DELETE FROM premier_queue WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+                await db.commit()
+                return cur.rowcount > 0
+
+    async def premier_list(self, guild_id: int) -> List[int]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT user_id FROM premier_queue WHERE guild_id = ? ORDER BY joined_at",
+                (guild_id,),
+            )
+            rows = await cur.fetchall()
+        return [int(uid) for (uid,) in rows]
+
+    async def premier_clear(self, guild_id: int) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("DELETE FROM premier_queue WHERE guild_id = ?", (guild_id,))
                 await db.commit()
 
     async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
@@ -1978,6 +2027,95 @@ async def rm_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Poistuttu jonosta.")
     return await interaction.response.send_message("Et ole jonossa tai poistuminen ei juuri nyt onnistu.", ephemeral=True)
 
+@bot.tree.command(name="premier", description="Ilmoittaudu kiinnostuneeksi seuraavasta premier-pelistä")
+async def premier_cmd(interaction: discord.Interaction):
+    assert interaction.guild_id
+    guild_id = interaction.guild_id
+    uid = interaction.user.id
+    if await bot.db.is_game_banned(uid):
+        return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä premier-jonoon.", ephemeral=True)
+    added = await bot.db.premier_add(guild_id, uid)
+    if not added:
+        return await interaction.response.send_message("Olet jo premier-jonossa.", ephemeral=True)
+
+    queue = await bot.db.premier_list(guild_id)
+    await interaction.response.send_message(
+        f"{mention(uid)} haluaa pelata premieriä! ({len(queue)}/{PREMIER_QUEUE_SIZE})"
+    )
+
+    if len(queue) >= PREMIER_QUEUE_SIZE:
+        await bot.db.premier_clear(guild_id)
+        mentions = " ".join(mention(u) for u in queue)
+        await interaction.followup.send(
+            f"**Premier-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+        )
+
+@bot.tree.command(name="premierrm", description="Poistu premier-jonosta")
+async def premierrm_cmd(interaction: discord.Interaction):
+    assert interaction.guild_id
+    removed = await bot.db.premier_remove(interaction.guild_id, interaction.user.id)
+    if removed:
+        return await interaction.response.send_message("Poistuttu premier-jonosta.")
+    return await interaction.response.send_message("Et ole premier-jonossa.", ephemeral=True)
+
+@bot.tree.command(name="komennot", description="Listaa kaikki botin komennot")
+async def komennot_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(title="Komennot", color=EMBED_COLOR_PRIMARY)
+    embed.add_field(
+        name="Jono ja draft",
+        value=(
+            "`/add` — Liity jonoon\n"
+            "`/rm` — Poistu jonosta\n"
+            "`/r` — Merkitse itsesi valmiiksi (readycheck)\n"
+            "`/pick <numero>` — Kapteeni: valitse pelaaja\n"
+            "`/dstatus` — Näytä jonon/draftin tila"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Premier-jono",
+        value=(
+            "`/premier` — Ilmoittaudu seuraavaan premier-peliin (max 5)\n"
+            "`/premierrm` — Poistu premier-jonosta"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Tilastot",
+        value=(
+            "`/pstats [pelaaja]` — Pelaajan tilastot\n"
+            "`/pickstats [pelaaja]` — Valintavuorotilastot\n"
+            "`/winrate <pelaaja>` — Winrate-vertailu\n"
+            "`/elo [pelaaja]` — Elo-luku"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Listat (Top 10)",
+        value="`/top10` `/topelo` `/winners` `/losers` `/captains` `/thinkids` `/fatkids`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Kaaviot",
+        value=(
+            "`/elochart` `/winlosschart` `/h2hchart` `/elodist` `/leaderboardchart`\n"
+            "`/activitychart` `/deltadist` `/pickwinratechart` `/teambalancechart` `/captainwinratechart`\n"
+            "Tekstimuoto: `!chart <tyyppi> [lisätieto]`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Muut",
+        value=(
+            "`/nocaptain` / `/allowcaptain` — Kapteeniuden opt-out\n"
+            "`/setwinner <game_id> <1|2|0>` / `/setdraw <game_id>` — Aseta pelin tulos\n"
+            "`/reset` / `/recalcelo` / `/pelikielto` / `/filltest` — Admin"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=EMBED_FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="r", description="Merkitse itsesi valmiiksi (readycheck)")
 async def r_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
@@ -3103,6 +3241,21 @@ async def add_bang(ctx: commands.Context):
 async def rm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await rm_cmd.callback(interaction)
+
+@bot.command(name="premier", aliases=["prem", "premiere", "premjono"])
+async def premier_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await premier_cmd.callback(interaction)
+
+@bot.command(name="premierrm", aliases=["premierpois", "poispremier", "premrm", "rmp"])
+async def premierrm_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await premierrm_cmd.callback(interaction)
+
+@bot.command(name="komennot", aliases=["komennnot", "commands", "cmds"])
+async def komennot_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await komennot_cmd.callback(interaction)
 
 @bot.command(name="r", aliases=["ready"])
 async def r_bang(ctx: commands.Context):

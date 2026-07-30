@@ -64,6 +64,7 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
 | `/premier` | `!premier`, `!prem`, `!premiere`, `!premjono` | Join the Premier queue (next 5-stack) |
 | `/premierrm` | `!premierrm`, `!premierpois`, `!poispremier`, `!premrm`, `!rmp` | Leave the Premier queue |
+| `/premierreset` | `!premierreset`, `!premreset`, `!premierclear`, `!resetpremier`, `!preset` | Clear the Premier queue |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
 | `/pickstats [user]` | `!pickstats` | View pick turn counts and average pick round |
 | `/winrate <user>` | `!winrate`, `!wr` | Compare your winrate against another player |
@@ -149,7 +150,7 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 
 ## Flow for Premier queue
 
-Separate from the regular draft queue above. Players use `/premier` to signal interest in the next Premier match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, everyone is pinged and the queue is cleared automatically, ready to fill up again for the following match. Use `/premierrm` to leave if plans change.
+Separate from the regular draft queue above. Players use `/premier` to signal interest in the next Premier match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, everyone is pinged and the queue is cleared automatically, ready to fill up again for the following match. Use `/premierrm` to leave if plans change, or `/premierreset` to manually clear the queue (available to everyone).
 
 ## Database Schema
 

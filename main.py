@@ -2058,6 +2058,12 @@ async def premierrm_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Poistuttu premier-jonosta.")
     return await interaction.response.send_message("Et ole premier-jonossa.", ephemeral=True)
 
+@bot.tree.command(name="premierreset", description="Tyhjennä premier-jono")
+async def premierreset_cmd(interaction: discord.Interaction):
+    assert interaction.guild_id
+    await bot.db.premier_clear(interaction.guild_id)
+    await interaction.response.send_message("Premier-jono nollattu.")
+
 @bot.tree.command(name="komennot", description="Listaa kaikki botin komennot")
 async def komennot_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="Komennot", color=EMBED_COLOR_PRIMARY)
@@ -2076,7 +2082,8 @@ async def komennot_cmd(interaction: discord.Interaction):
         name="Premier-jono",
         value=(
             "`/premier` — Ilmoittaudu seuraavaan premier-peliin (max 5)\n"
-            "`/premierrm` — Poistu premier-jonosta"
+            "`/premierrm` — Poistu premier-jonosta\n"
+            "`/premierreset` — Tyhjennä premier-jono"
         ),
         inline=False,
     )
@@ -3251,6 +3258,11 @@ async def premier_bang(ctx: commands.Context):
 async def premierrm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await premierrm_cmd.callback(interaction)
+
+@bot.command(name="premierreset", aliases=["premreset", "premierclear", "resetpremier", "preset"])
+async def premierreset_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await premierreset_cmd.callback(interaction)
 
 @bot.command(name="komennot", aliases=["komennnot", "commands", "cmds"])
 async def komennot_bang(ctx: commands.Context):

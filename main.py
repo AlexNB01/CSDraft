@@ -9,12 +9,13 @@ import typing
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv; load_dotenv()
 
 import aiosqlite
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import matplotlib
 matplotlib.use("Agg")
@@ -32,6 +33,10 @@ AUTO_VOICE_CHANNELS = True
 TEAM1_VOICE_CHANNEL_ID = 1442861436542910494
 TEAM2_VOICE_CHANNEL_ID = 1442861481564831785
 VOICE_LOBBY_CHANNEL_ID = 364497233061871628
+
+# ---- Jonojen yönollaus ----
+QUEUE_RESET_TZ = ZoneInfo("Europe/Helsinki")
+QUEUE_RESET_TIME = datetime.time(hour=4, minute=0, tzinfo=QUEUE_RESET_TZ)
 
 # ---- UI: värit ja footer ----
 EMBED_COLOR_PRIMARY = 0x29377e
@@ -169,8 +174,9 @@ class DraftState:
     rc_timer_task: Optional[asyncio.Task] = None
     rc_timer_msg: Optional[discord.Message] = None
     rc_deadline_ts: Optional[float] = None
-    pick_timer_seq: int = 0    
+    pick_timer_seq: int = 0
     game_id: Optional[int] = None
+    last_channel_id: Optional[int] = None
 
 
 # -----------------------------
@@ -225,6 +231,13 @@ CREATE TABLE IF NOT EXISTS premier_queue (
   guild_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS queue_entries (
+  guild_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  joined_at TIMESTAMP NOT NULL,
   PRIMARY KEY (guild_id, user_id)
 );
 """
@@ -425,6 +438,40 @@ class DB:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 await db.execute("DELETE FROM premier_queue WHERE guild_id = ?", (guild_id,))
+                await db.commit()
+
+    async def queue_sync(self, guild_id: int, entries: List[Tuple[int, datetime.datetime]]) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("DELETE FROM queue_entries WHERE guild_id = ?", (guild_id,))
+                await db.executemany(
+                    "INSERT INTO queue_entries (guild_id, user_id, joined_at) VALUES (?, ?, ?)",
+                    [(guild_id, uid, joined_at.isoformat()) for uid, joined_at in entries],
+                )
+                await db.commit()
+
+    async def queue_load(self, guild_id: int) -> Dict[int, datetime.datetime]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT user_id, joined_at FROM queue_entries WHERE guild_id = ? ORDER BY joined_at",
+                (guild_id,),
+            )
+            rows = await cur.fetchall()
+        result: Dict[int, datetime.datetime] = {}
+        for uid, joined_at in rows:
+            try:
+                dt = datetime.datetime.fromisoformat(joined_at)
+            except ValueError:
+                dt = datetime.datetime.now(datetime.timezone.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            result[int(uid)] = dt
+        return result
+
+    async def queue_clear(self, guild_id: int) -> None:
+        async with self._lock:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("DELETE FROM queue_entries WHERE guild_id = ?", (guild_id,))
                 await db.commit()
 
     async def get_rating_changes_for_game(self, game_id: int) -> Dict[int, float]:
@@ -1134,6 +1181,7 @@ class DraftBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, case_insensitive=True)
         self.db = DB()
         self.states: Dict[int, DraftState] = {}  # key: guild_id
+        self._queues_restored = False
 
     def get_state(self, guild_id: int) -> DraftState:
         if guild_id not in self.states:
@@ -1157,6 +1205,11 @@ bot = DraftBot()
 
 def mention(uid: int) -> str:
     return f"<@{uid}>"
+
+async def sync_queue_db(guild_id: int, st: DraftState) -> None:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    entries = [(uid, st.queue_joined_at.get(uid, now)) for uid in st.queue]
+    await bot.db.queue_sync(guild_id, entries)
 
 def format_elapsed(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
@@ -1567,6 +1620,7 @@ async def _finish_or_next(interaction: discord.Interaction, st: DraftState):
             for uid, joined_at in st.queue_joined_at.items()
             if uid in st.queue
         }
+        await sync_queue_db(interaction.guild_id, st)
         st.draft_active = False
         st.captains = None
         st.team1.clear(); st.team2.clear(); st.pick_pool.clear()
@@ -1943,6 +1997,7 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
                 for uid, joined_at in st.queue_joined_at.items()
                 if uid in st.queue
             }
+            await sync_queue_db(interaction.guild_id, st)
         else:
             await interaction.followup.send("⏰ Readycheck päättyi.")
 
@@ -1997,8 +2052,10 @@ async def add_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Draft käynnissä tai readycheck päällä – ei uusia liittymisiä.", ephemeral=True)
     if uid in st.queue:
         return await interaction.response.send_message("Olet jo jonossa.", ephemeral=True)
+    st.last_channel_id = interaction.channel.id if interaction.channel else st.last_channel_id
     st.queue.append(uid)
     st.queue_joined_at[uid] = datetime.datetime.now(datetime.timezone.utc)
+    await sync_queue_db(interaction.guild_id, st)
     await interaction.response.send_message(f"Lisätty jonoon. Pelaajia jonossa: {len(st.queue)}/{QUEUE_SIZE}")
 
     if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
@@ -2024,6 +2081,7 @@ async def rm_cmd(interaction: discord.Interaction):
     if uid in st.queue and not st.readycheck_active and not st.draft_active:
         st.queue.remove(uid)
         st.queue_joined_at.pop(uid, None)
+        await sync_queue_db(interaction.guild_id, st)
         return await interaction.response.send_message("Poistuttu jonosta.")
     return await interaction.response.send_message("Et ole jonossa tai poistuminen ei juuri nyt onnistu.", ephemeral=True)
 
@@ -2031,6 +2089,7 @@ async def rm_cmd(interaction: discord.Interaction):
 async def premier_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     guild_id = interaction.guild_id
+    st = bot.get_state(guild_id)
     uid = interaction.user.id
     if await bot.db.is_game_banned(uid):
         return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä premier-jonoon.", ephemeral=True)
@@ -2038,6 +2097,7 @@ async def premier_cmd(interaction: discord.Interaction):
     if not added:
         return await interaction.response.send_message("Olet jo premier-jonossa.", ephemeral=True)
 
+    st.last_channel_id = interaction.channel.id if interaction.channel else st.last_channel_id
     queue = await bot.db.premier_list(guild_id)
     await interaction.response.send_message(
         f"{mention(uid)} haluaa pelata premieriä! ({len(queue)}/{PREMIER_QUEUE_SIZE})"
@@ -2064,6 +2124,63 @@ async def premierreset_cmd(interaction: discord.Interaction):
     await bot.db.premier_clear(interaction.guild_id)
     await interaction.response.send_message("Premier-jono nollattu.")
 
+@bot.tree.command(name="molemmat", description="Liity sekä draft- että premier-jonoon")
+async def molemmat_cmd(interaction: discord.Interaction):
+    assert interaction.guild_id
+    guild_id = interaction.guild_id
+    st = bot.get_state(guild_id)
+    uid = interaction.user.id
+
+    if await bot.db.is_game_banned(uid):
+        return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä jonoihin.", ephemeral=True)
+
+    st.last_channel_id = interaction.channel.id if interaction.channel else st.last_channel_id
+
+    lines = []
+    trigger_readycheck = False
+    if st.draft_active or st.readycheck_active:
+        lines.append("Draft käynnissä tai readycheck päällä – ei uusia liittymisiä jonoon.")
+    elif uid in st.queue:
+        lines.append("Olet jo jonossa.")
+    else:
+        st.queue.append(uid)
+        st.queue_joined_at[uid] = datetime.datetime.now(datetime.timezone.utc)
+        await sync_queue_db(guild_id, st)
+        lines.append(f"Lisätty jonoon. Pelaajia jonossa: {len(st.queue)}/{QUEUE_SIZE}")
+        if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
+            trigger_readycheck = True
+
+    premier_added = await bot.db.premier_add(guild_id, uid)
+    premier_queue = await bot.db.premier_list(guild_id)
+    if premier_added:
+        lines.append(f"{mention(uid)} haluaa pelata premieriä! ({len(premier_queue)}/{PREMIER_QUEUE_SIZE})")
+    else:
+        lines.append("Olet jo premier-jonossa.")
+
+    await interaction.response.send_message("\n".join(lines))
+
+    if len(premier_queue) >= PREMIER_QUEUE_SIZE:
+        await bot.db.premier_clear(guild_id)
+        mentions = " ".join(mention(u) for u in premier_queue)
+        await interaction.followup.send(
+            f"**Premier-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+        )
+
+    if trigger_readycheck:
+        st.readycheck_active = True
+        st.ready_users = set()
+        st.ready_users.add(uid)
+        mentions = " ".join(mention(u) for u in st.queue)
+        view = ReadyCheckButton(bot, guild_id)
+        await interaction.followup.send(
+            f"**Jonossa 10 pelaajaa!** Readycheck alkaa nyt ({READYCHECK_SECONDS}s).\n"
+            f"{mentions}\n"
+            f"Klikkaa nappia tai kirjoita **!r** ollaksesi mukana seuraavassa pelissä!",
+            view=view
+        )
+        await start_ready_timer(interaction, st)
+        st.ready_task = asyncio.create_task(ready_timeout_run(interaction, st))
+
 @bot.tree.command(name="komennot", description="Listaa kaikki botin komennot")
 async def komennot_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="Komennot", color=EMBED_COLOR_PRIMARY)
@@ -2083,7 +2200,8 @@ async def komennot_cmd(interaction: discord.Interaction):
         value=(
             "`/premier` — Ilmoittaudu seuraavaan premier-peliin (max 5)\n"
             "`/premierrm` — Poistu premier-jonosta\n"
-            "`/premierreset` — Tyhjennä premier-jono"
+            "`/premierreset` — Tyhjennä premier-jono\n"
+            "`/molemmat` — Liity sekä draft- että premier-jonoon"
         ),
         inline=False,
     )
@@ -3140,6 +3258,7 @@ async def reset_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Vain ylläpito voi nollata jonon.", ephemeral=True)
     st = bot.get_state(interaction.guild_id)
     st.queue.clear(); st.queue_joined_at.clear(); st.ready_users.clear(); st.readycheck_active = False
+    await bot.db.queue_clear(interaction.guild_id)
     if st.ready_task and not st.ready_task.done():
         st.ready_task.cancel()
     st.draft_active = False
@@ -3263,6 +3382,11 @@ async def premierrm_bang(ctx: commands.Context):
 async def premierreset_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await premierreset_cmd.callback(interaction)
+
+@bot.command(name="molemmat", aliases=["both", "kaikki", "addboth", "molempiin"])
+async def molemmat_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await molemmat_cmd.callback(interaction)
 
 @bot.command(name="komennot", aliases=["komennnot", "commands", "cmds"])
 async def komennot_bang(ctx: commands.Context):
@@ -3420,11 +3544,55 @@ async def pelikielto_bang(ctx: commands.Context, user: Optional[discord.Member] 
     await pelikielto_cmd.callback(InteractionShim(ctx), user)
 
 # -----------------------------
+# Jonojen yönollaus (04:00 Europe/Helsinki) :3
+# -----------------------------
+@tasks.loop(time=QUEUE_RESET_TIME)
+async def nightly_queue_reset():
+    for guild in bot.guilds:
+        st = bot.get_state(guild.id)
+        premier_queue = await bot.db.premier_list(guild.id)
+        had_queue = bool(st.queue) or bool(st.readycheck_active) or bool(premier_queue)
+        channel = None
+        if st.last_channel_id:
+            channel = guild.get_channel(st.last_channel_id)
+        if channel is None:
+            channel = guild.system_channel
+
+        st.queue.clear()
+        st.queue_joined_at.clear()
+        st.ready_users.clear()
+        st.fake_users.clear()
+        st.readycheck_active = False
+        if st.ready_task and not st.ready_task.done():
+            st.ready_task.cancel()
+        st.ready_task = None
+        await bot.db.queue_clear(guild.id)
+        await bot.db.premier_clear(guild.id)
+
+        if channel is not None and had_queue:
+            try:
+                await channel.send("Jono ja premier-jono nollattu automaattisesti yönollauksessa")
+            except discord.HTTPException:
+                pass
+    print("Jono ja premier-jono nollattu (yönollaus 04:00).")
+
+# -----------------------------
 # Käynnistys :3
 # -----------------------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
+    if not bot._queues_restored:
+        bot._queues_restored = True
+        for guild in bot.guilds:
+            st = bot.get_state(guild.id)
+            restored = await bot.db.queue_load(guild.id)
+            st.queue = list(restored.keys())
+            st.queue_joined_at = restored
+
+    if not nightly_queue_reset.is_running():
+        nightly_queue_reset.start()
 
 if __name__ == "____main__":
     pass

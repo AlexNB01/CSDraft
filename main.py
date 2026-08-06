@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 # Configi :3
 # -----------------------------
 QUEUE_SIZE = 10
-PREMIER_QUEUE_SIZE = 5
+FACEIT_QUEUE_SIZE = 5
 READYCHECK_SECONDS = 120
 GUILD_SCOPED = True
 PICK_TIMEOUT_SECONDS = 45
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS game_bans (
   user_id INTEGER PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS premier_queue (
+CREATE TABLE IF NOT EXISTS faceit_queue (
   guild_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -399,45 +399,45 @@ class DB:
                     await db.execute("DELETE FROM game_bans WHERE user_id = ?", (user_id,))
                 await db.commit()
 
-    async def premier_add(self, guild_id: int, user_id: int) -> bool:
+    async def faceit_add(self, guild_id: int, user_id: int) -> bool:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 cur = await db.execute(
-                    "SELECT 1 FROM premier_queue WHERE guild_id = ? AND user_id = ?",
+                    "SELECT 1 FROM faceit_queue WHERE guild_id = ? AND user_id = ?",
                     (guild_id, user_id),
                 )
                 if await cur.fetchone():
                     return False
                 await db.execute(
-                    "INSERT INTO premier_queue (guild_id, user_id) VALUES (?, ?)",
+                    "INSERT INTO faceit_queue (guild_id, user_id) VALUES (?, ?)",
                     (guild_id, user_id),
                 )
                 await db.commit()
                 return True
 
-    async def premier_remove(self, guild_id: int, user_id: int) -> bool:
+    async def faceit_remove(self, guild_id: int, user_id: int) -> bool:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
                 cur = await db.execute(
-                    "DELETE FROM premier_queue WHERE guild_id = ? AND user_id = ?",
+                    "DELETE FROM faceit_queue WHERE guild_id = ? AND user_id = ?",
                     (guild_id, user_id),
                 )
                 await db.commit()
                 return cur.rowcount > 0
 
-    async def premier_list(self, guild_id: int) -> List[int]:
+    async def faceit_list(self, guild_id: int) -> List[int]:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
-                "SELECT user_id FROM premier_queue WHERE guild_id = ? ORDER BY joined_at",
+                "SELECT user_id FROM faceit_queue WHERE guild_id = ? ORDER BY joined_at",
                 (guild_id,),
             )
             rows = await cur.fetchall()
         return [int(uid) for (uid,) in rows]
 
-    async def premier_clear(self, guild_id: int) -> None:
+    async def faceit_clear(self, guild_id: int) -> None:
         async with self._lock:
             async with aiosqlite.connect(self.path) as db:
-                await db.execute("DELETE FROM premier_queue WHERE guild_id = ?", (guild_id,))
+                await db.execute("DELETE FROM faceit_queue WHERE guild_id = ?", (guild_id,))
                 await db.commit()
 
     async def queue_sync(self, guild_id: int, entries: List[Tuple[int, datetime.datetime]]) -> None:
@@ -2085,46 +2085,46 @@ async def rm_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Poistuttu jonosta.")
     return await interaction.response.send_message("Et ole jonossa tai poistuminen ei juuri nyt onnistu.", ephemeral=True)
 
-@bot.tree.command(name="premier", description="Ilmoittaudu kiinnostuneeksi seuraavasta premier-pelistä")
-async def premier_cmd(interaction: discord.Interaction):
+@bot.tree.command(name="faceit", description="Ilmoittaudu kiinnostuneeksi seuraavasta faceit-pelistä")
+async def faceit_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     guild_id = interaction.guild_id
     st = bot.get_state(guild_id)
     uid = interaction.user.id
     if await bot.db.is_game_banned(uid):
-        return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä premier-jonoon.", ephemeral=True)
-    added = await bot.db.premier_add(guild_id, uid)
+        return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä faceit-jonoon.", ephemeral=True)
+    added = await bot.db.faceit_add(guild_id, uid)
     if not added:
-        return await interaction.response.send_message("Olet jo premier-jonossa.", ephemeral=True)
+        return await interaction.response.send_message("Olet jo faceit-jonossa.", ephemeral=True)
 
     st.last_channel_id = interaction.channel.id if interaction.channel else st.last_channel_id
-    queue = await bot.db.premier_list(guild_id)
+    queue = await bot.db.faceit_list(guild_id)
     await interaction.response.send_message(
-        f"{mention(uid)} haluaa pelata premieriä! ({len(queue)}/{PREMIER_QUEUE_SIZE})"
+        f"{mention(uid)} haluaa pelata faceittia! ({len(queue)}/{FACEIT_QUEUE_SIZE})"
     )
 
-    if len(queue) >= PREMIER_QUEUE_SIZE:
-        await bot.db.premier_clear(guild_id)
+    if len(queue) >= FACEIT_QUEUE_SIZE:
+        await bot.db.faceit_clear(guild_id)
         mentions = " ".join(mention(u) for u in queue)
         await interaction.followup.send(
-            f"**Premier-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+            f"**Faceit-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
         )
 
-@bot.tree.command(name="premierrm", description="Poistu premier-jonosta")
-async def premierrm_cmd(interaction: discord.Interaction):
+@bot.tree.command(name="faceitrm", description="Poistu faceit-jonosta")
+async def faceitrm_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
-    removed = await bot.db.premier_remove(interaction.guild_id, interaction.user.id)
+    removed = await bot.db.faceit_remove(interaction.guild_id, interaction.user.id)
     if removed:
-        return await interaction.response.send_message("Poistuttu premier-jonosta.")
-    return await interaction.response.send_message("Et ole premier-jonossa.", ephemeral=True)
+        return await interaction.response.send_message("Poistuttu faceit-jonosta.")
+    return await interaction.response.send_message("Et ole faceit-jonossa.", ephemeral=True)
 
-@bot.tree.command(name="premierreset", description="Tyhjennä premier-jono")
-async def premierreset_cmd(interaction: discord.Interaction):
+@bot.tree.command(name="faceitreset", description="Tyhjennä faceit-jono")
+async def faceitreset_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
-    await bot.db.premier_clear(interaction.guild_id)
-    await interaction.response.send_message("Premier-jono nollattu.")
+    await bot.db.faceit_clear(interaction.guild_id)
+    await interaction.response.send_message("Faceit-jono nollattu.")
 
-@bot.tree.command(name="molemmat", description="Liity sekä draft- että premier-jonoon")
+@bot.tree.command(name="molemmat", description="Liity sekä draft- että faceit-jonoon")
 async def molemmat_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
     guild_id = interaction.guild_id
@@ -2150,20 +2150,20 @@ async def molemmat_cmd(interaction: discord.Interaction):
         if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
             trigger_readycheck = True
 
-    premier_added = await bot.db.premier_add(guild_id, uid)
-    premier_queue = await bot.db.premier_list(guild_id)
-    if premier_added:
-        lines.append(f"{mention(uid)} haluaa pelata premieriä! ({len(premier_queue)}/{PREMIER_QUEUE_SIZE})")
+    faceit_added = await bot.db.faceit_add(guild_id, uid)
+    faceit_queue = await bot.db.faceit_list(guild_id)
+    if faceit_added:
+        lines.append(f"{mention(uid)} haluaa pelata faceittia! ({len(faceit_queue)}/{FACEIT_QUEUE_SIZE})")
     else:
-        lines.append("Olet jo premier-jonossa.")
+        lines.append("Olet jo faceit-jonossa.")
 
     await interaction.response.send_message("\n".join(lines))
 
-    if len(premier_queue) >= PREMIER_QUEUE_SIZE:
-        await bot.db.premier_clear(guild_id)
-        mentions = " ".join(mention(u) for u in premier_queue)
+    if len(faceit_queue) >= FACEIT_QUEUE_SIZE:
+        await bot.db.faceit_clear(guild_id)
+        mentions = " ".join(mention(u) for u in faceit_queue)
         await interaction.followup.send(
-            f"**Premier-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+            f"**Faceit-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
         )
 
     if trigger_readycheck:
@@ -2196,12 +2196,12 @@ async def komennot_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="Premier-jono",
+        name="Faceit-jono",
         value=(
-            "`/premier` — Ilmoittaudu seuraavaan premier-peliin (max 5)\n"
-            "`/premierrm` — Poistu premier-jonosta\n"
-            "`/premierreset` — Tyhjennä premier-jono\n"
-            "`/molemmat` — Liity sekä draft- että premier-jonoon"
+            "`/faceit` — Ilmoittaudu seuraavaan faceit-peliin (max 5)\n"
+            "`/faceitrm` — Poistu faceit-jonosta\n"
+            "`/faceitreset` — Tyhjennä faceit-jono\n"
+            "`/molemmat` — Liity sekä draft- että faceit-jonoon"
         ),
         inline=False,
     )
@@ -3368,20 +3368,20 @@ async def rm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await rm_cmd.callback(interaction)
 
-@bot.command(name="premier", aliases=["prem", "premiere", "premjono"])
-async def premier_bang(ctx: commands.Context):
+@bot.command(name="faceit", aliases=["prem", "faceite", "premjono"])
+async def faceit_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
-    await premier_cmd.callback(interaction)
+    await faceit_cmd.callback(interaction)
 
-@bot.command(name="premierrm", aliases=["premierpois", "poispremier", "premrm", "rmp"])
-async def premierrm_bang(ctx: commands.Context):
+@bot.command(name="faceitrm", aliases=["faceitpois", "poisfaceit", "premrm", "rmp"])
+async def faceitrm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
-    await premierrm_cmd.callback(interaction)
+    await faceitrm_cmd.callback(interaction)
 
-@bot.command(name="premierreset", aliases=["premreset", "premierclear", "resetpremier", "preset"])
-async def premierreset_bang(ctx: commands.Context):
+@bot.command(name="faceitreset", aliases=["premreset", "faceitclear", "resetfaceit", "preset"])
+async def faceitreset_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
-    await premierreset_cmd.callback(interaction)
+    await faceitreset_cmd.callback(interaction)
 
 @bot.command(name="molemmat", aliases=["both", "kaikki", "addboth", "molempiin"])
 async def molemmat_bang(ctx: commands.Context):
@@ -3550,8 +3550,8 @@ async def pelikielto_bang(ctx: commands.Context, user: Optional[discord.Member] 
 async def nightly_queue_reset():
     for guild in bot.guilds:
         st = bot.get_state(guild.id)
-        premier_queue = await bot.db.premier_list(guild.id)
-        had_queue = bool(st.queue) or bool(st.readycheck_active) or bool(premier_queue)
+        faceit_queue = await bot.db.faceit_list(guild.id)
+        had_queue = bool(st.queue) or bool(st.readycheck_active) or bool(faceit_queue)
         channel = None
         if st.last_channel_id:
             channel = guild.get_channel(st.last_channel_id)
@@ -3567,14 +3567,14 @@ async def nightly_queue_reset():
             st.ready_task.cancel()
         st.ready_task = None
         await bot.db.queue_clear(guild.id)
-        await bot.db.premier_clear(guild.id)
+        await bot.db.faceit_clear(guild.id)
 
         if channel is not None and had_queue:
             try:
-                await channel.send("Jono ja premier-jono nollattu automaattisesti yönollauksessa")
+                await channel.send("Jono ja faceit-jono nollattu automaattisesti yönollauksessa")
             except discord.HTTPException:
                 pass
-    print("Jono ja premier-jono nollattu (yönollaus 04:00).")
+    print("Jono ja faceit-jono nollattu (yönollaus 04:00).")
 
 # -----------------------------
 # Käynnistys :3

@@ -10,7 +10,7 @@ A feature-rich Discord bot for organizing Counter-Strike draft matches with auto
 A simple Discord bot for organizing CS2 inhouse matches with:
 
 - Automated queue, readycheck, and captain draft flow
-- Premier queue for gathering a 5-stack ahead of the next Premier match
+- Faceit queue for gathering a 5-stack ahead of the next Faceit match
 - Player stats tracking (wins, captain picks, first/last pick counts)
 - Pick turn breakdowns with average pick round stats
 - Elo ratings with leaderboards
@@ -46,7 +46,7 @@ Key settings in `main.py`:
 
 ```python
 QUEUE_SIZE = 10                    # Players needed for a draft
-PREMIER_QUEUE_SIZE = 5             # Players needed for a Premier 5-stack
+FACEIT_QUEUE_SIZE = 5              # Players needed for a Faceit 5-stack
 READYCHECK_SECONDS = 120           # Readycheck timeout (2 minutes)
 PICK_TIMEOUT_SECONDS = 45          # Captain pick timeout
 AUTO_VOICE_CHANNELS = True         # Enable automatic voice channel moves
@@ -62,9 +62,10 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/add` | `!add`, `!dad`, `!ad`, etc. | Join the draft queue |
 | `/rm` | `!rm`, `!remove` | Leave the queue |
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
-| `/premier` | `!premier`, `!prem`, `!premiere`, `!premjono` | Join the Premier queue (next 5-stack) |
-| `/premierrm` | `!premierrm`, `!premierpois`, `!poispremier`, `!premrm`, `!rmp` | Leave the Premier queue |
-| `/premierreset` | `!premierreset`, `!premreset`, `!premierclear`, `!resetpremier`, `!preset` | Clear the Premier queue |
+| `/faceit` | `!faceit`, `!prem`, `!faceite`, `!premjono` | Join the Faceit queue (next 5-stack) |
+| `/faceitrm` | `!faceitrm`, `!faceitpois`, `!poisfaceit`, `!premrm`, `!rmp` | Leave the Faceit queue |
+| `/faceitreset` | `!faceitreset`, `!premreset`, `!faceitclear`, `!resetfaceit`, `!preset` | Clear the Faceit queue |
+| `/molemmat` | `!molemmat`, `!both`, `!kaikki`, `!addboth`, `!molempiin` | Join both the draft queue and the Faceit queue |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
 | `/pickstats [user]` | `!pickstats` | View pick turn counts and average pick round |
 | `/winrate <user>` | `!winrate`, `!wr` | Compare your winrate against another player |
@@ -148,9 +149,9 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 - Stats are updated automatically
 - Players moved back to lobby voice channel after 15 seconds
 
-## Flow for Premier queue
+## Flow for Faceit queue
 
-Separate from the regular draft queue above. Players use `/premier` to signal interest in the next Premier match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, everyone is pinged and the queue is cleared automatically, ready to fill up again for the following match. Use `/premierrm` to leave if plans change, or `/premierreset` to manually clear the queue (available to everyone).
+Separate from the regular draft queue above. Players use `/faceit` to signal interest in the next Faceit match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, everyone is pinged and the queue is cleared automatically, ready to fill up again for the following match. Use `/faceitrm` to leave if plans change, or `/faceitreset` to manually clear the queue (available to everyone). Use `/molemmat` to join both the draft and Faceit queues in one command.
 
 ## Database Schema
 
@@ -194,7 +195,7 @@ The bot uses SQLite with the following tables:
 
 - `user_id` - Discord user ID (primary key)
 
-### premier_queue
+### faceit_queue
 
 - `guild_id` - Discord server ID
 - `user_id` - Discord user ID

@@ -63,7 +63,8 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/rm` | `!rm`, `!remove` | Leave the queue |
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
 | `/faceit` | `!faceit`, `!prem`, `!faceite`, `!premjono` | Join the Faceit queue (next 5-stack) |
-| `/faceitrm` | `!faceitrm`, `!faceitpois`, `!poisfaceit`, `!premrm`, `!rmp` | Leave the Faceit queue |
+| `/faceitrm` | `!faceitrm`, `!faceitpois`, `!poisfaceit`, `!premrm`, `!rmp`, `!rmf`, `!frm` | Leave the Faceit queue |
+| `/fr` | `!fr`, `!readyf`, `!rf`, `!valmisfaceit` | Ready up during Faceit readycheck (or click button) |
 | `/faceitreset` | `!faceitreset`, `!premreset`, `!faceitclear`, `!resetfaceit`, `!preset` | Clear the Faceit queue |
 | `/molemmat` | `!molemmat`, `!both`, `!kaikki`, `!addboth`, `!molempiin` | Join both the draft queue and the Faceit queue |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
@@ -151,7 +152,7 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 
 ## Flow for Faceit queue
 
-Separate from the regular draft queue above. Players use `/faceit` to signal interest in the next Faceit match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, everyone is pinged and the queue is cleared automatically, ready to fill up again for the following match. Use `/faceitrm` to leave if plans change, or `/faceitreset` to manually clear the queue (available to everyone). Use `/molemmat` to join both the draft and Faceit queues in one command.
+Separate from the regular draft queue above. Players use `/faceit` to signal interest in the next Faceit match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, a readycheck starts automatically, just like the draft queue: players have `READYCHECK_SECONDS` (120s by default) to click the ready button or type `/fr`. If everyone readies up, the queue is cleared automatically and everyone is pinged, ready to fill up again for the following match. Players who don't ready up in time are removed from the Faceit queue, and the remaining ready players stay queued for the next join. No one can join or leave the Faceit queue while a readycheck is in progress. Use `/faceitrm` to leave if plans change, or `/faceitreset` to manually clear the queue and cancel any active readycheck (available to everyone). Use `/molemmat` to join both the draft and Faceit queues in one command.
 
 ## Database Schema
 

@@ -177,6 +177,12 @@ class DraftState:
     pick_timer_seq: int = 0
     game_id: Optional[int] = None
     last_channel_id: Optional[int] = None
+    faceit_readycheck_active: bool = False
+    faceit_ready_users: Set[int] = field(default_factory=set)
+    faceit_ready_task: Optional[asyncio.Task] = None
+    faceit_rc_timer_task: Optional[asyncio.Task] = None
+    faceit_rc_timer_msg: Optional[discord.Message] = None
+    faceit_rc_deadline_ts: Optional[float] = None
 
 
 # -----------------------------
@@ -2016,6 +2022,184 @@ async def ready_timeout_run(interaction: discord.Interaction, st: DraftState):
         st.rc_timer_msg = None
         return
 
+async def start_faceit_ready_timer(interaction: discord.Interaction, st: DraftState):
+    if st.faceit_rc_timer_task and not st.faceit_rc_timer_task.done():
+        st.faceit_rc_timer_task.cancel()
+    if st.faceit_rc_timer_msg:
+        try:
+            await st.faceit_rc_timer_msg.delete()
+        except Exception:
+            pass
+        st.faceit_rc_timer_msg = None
+
+    st.faceit_rc_deadline_ts = asyncio.get_running_loop().time() + READYCHECK_SECONDS
+    st.faceit_rc_timer_task = asyncio.create_task(_run_faceit_ready_countdown(interaction, st))
+
+
+async def _run_faceit_ready_countdown(interaction: discord.Interaction, st: DraftState):
+    try:
+        loop = asyncio.get_running_loop()
+
+        def remaining() -> int:
+            now = loop.time()
+            return int(max(0, (st.faceit_rc_deadline_ts or now) - now))
+
+        while st.faceit_readycheck_active:
+            rem = remaining()
+            if rem <= 15:
+                break
+            await asyncio.sleep(max(0.5, rem - 15))
+
+        if not st.faceit_readycheck_active:
+            return
+
+        for _ in range(1000):
+            rem = remaining()
+
+            text = f"⏳ Faceit-readycheck: **{rem}s** aikaa jäljellä… Kirjoita **!fr** tai klikkaa nappia!"
+            if st.faceit_rc_timer_msg is None:
+                try:
+                    st.faceit_rc_timer_msg = await interaction.followup.send(text, ephemeral=False)
+                except Exception:
+                    if interaction.channel:
+                        st.faceit_rc_timer_msg = await interaction.channel.send(text)
+            else:
+                try:
+                    await st.faceit_rc_timer_msg.edit(content=text)
+                except Exception:
+                    if interaction.channel:
+                        st.faceit_rc_timer_msg = await interaction.channel.send(text)
+
+            if rem <= 0 or not st.faceit_readycheck_active:
+                break
+            await asyncio.sleep(1)
+
+        if st.faceit_rc_timer_msg:
+            try:
+                await st.faceit_rc_timer_msg.delete()
+            except Exception:
+                pass
+            st.faceit_rc_timer_msg = None
+
+    except asyncio.CancelledError:
+        if st.faceit_rc_timer_msg:
+            try:
+                await st.faceit_rc_timer_msg.delete()
+            except Exception:
+                pass
+        st.faceit_rc_timer_msg = None
+        return
+
+class FaceitReadyCheckButton(discord.ui.View):
+    def __init__(self, bot_instance: 'DraftBot', guild_id: int):
+        super().__init__(timeout=READYCHECK_SECONDS)
+        self.bot = bot_instance
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="PAIKALLA! :3", style=discord.ButtonStyle.green, emoji="✅")
+    async def ready_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        st = self.bot.get_state(self.guild_id)
+
+        if not st.faceit_readycheck_active:
+            return await interaction.response.send_message("Faceit-readycheck ei ole enää käynnissä.", ephemeral=True)
+
+        queue = await self.bot.db.faceit_list(self.guild_id)
+        if interaction.user.id not in queue:
+            return await interaction.response.send_message("Et ole faceit-jonossa.", ephemeral=True)
+
+        if interaction.user.id in st.faceit_ready_users:
+            return await interaction.response.send_message("Olet jo merkinnyt itsesi valmiiksi!", ephemeral=True)
+
+        st.faceit_ready_users.add(interaction.user.id)
+        left = FACEIT_QUEUE_SIZE - len(st.faceit_ready_users)
+
+        if left > 0:
+            await interaction.response.send_message(f"✅ Merkitty valmiiksi! Odotetaan vielä {left} pelaajaa…", ephemeral=True)
+        else:
+            await interaction.response.defer()
+            await finish_faceit_readycheck(interaction, st)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+async def faceit_ready_timeout_run(interaction: discord.Interaction, st: DraftState):
+    try:
+        await asyncio.sleep(READYCHECK_SECONDS)
+
+        if not st.faceit_readycheck_active:
+            return
+
+        guild_id = interaction.guild_id
+
+        if st.faceit_rc_timer_task and not st.faceit_rc_timer_task.done():
+            st.faceit_rc_timer_task.cancel()
+        st.faceit_rc_timer_task = None
+        if st.faceit_rc_timer_msg:
+            try:
+                await st.faceit_rc_timer_msg.delete()
+            except Exception:
+                pass
+        st.faceit_rc_timer_msg = None
+
+        st.faceit_readycheck_active = False
+
+        queue = await bot.db.faceit_list(guild_id)
+        puuttuvat = [u for u in queue if u not in st.faceit_ready_users]
+
+        if puuttuvat:
+            nimet = [await get_display_name(interaction, u) for u in puuttuvat]
+            for u in puuttuvat:
+                await bot.db.faceit_remove(guild_id, u)
+            await interaction.followup.send(
+                "Faceit-readycheck päättyi aikarajaan.\n"
+                "Seuraavat eivät vahvistaneet ja poistettiin faceit-jonosta: " + ", ".join(nimet)
+            )
+        else:
+            await interaction.followup.send("⏰ Faceit-readycheck päättyi.")
+
+        st.faceit_ready_users.clear()
+
+    except asyncio.CancelledError:
+        if st.faceit_rc_timer_task and not st.faceit_rc_timer_task.done():
+            st.faceit_rc_timer_task.cancel()
+        st.faceit_rc_timer_task = None
+        if st.faceit_rc_timer_msg:
+            try:
+                await st.faceit_rc_timer_msg.delete()
+            except Exception:
+                pass
+        st.faceit_rc_timer_msg = None
+        return
+
+async def finish_faceit_readycheck(interaction: discord.Interaction, st: DraftState):
+    assert interaction.guild_id
+    guild_id = interaction.guild_id
+
+    st.faceit_readycheck_active = False
+    if st.faceit_ready_task and not st.faceit_ready_task.done():
+        st.faceit_ready_task.cancel()
+    st.faceit_ready_task = None
+
+    if st.faceit_rc_timer_task and not st.faceit_rc_timer_task.done():
+        st.faceit_rc_timer_task.cancel()
+    st.faceit_rc_timer_task = None
+    if st.faceit_rc_timer_msg:
+        try:
+            await st.faceit_rc_timer_msg.delete()
+        except Exception:
+            pass
+    st.faceit_rc_timer_msg = None
+
+    queue = await bot.db.faceit_list(guild_id)
+    await bot.db.faceit_clear(guild_id)
+    st.faceit_ready_users.clear()
+
+    mentions = " ".join(mention(u) for u in queue)
+    await interaction.followup.send(
+        f"**Faceit-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+    )
+
 class InteractionShim:
     def __init__(self, ctx: commands.Context):
         self._ctx = ctx
@@ -2093,6 +2277,8 @@ async def faceit_cmd(interaction: discord.Interaction):
     uid = interaction.user.id
     if await bot.db.is_game_banned(uid):
         return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä faceit-jonoon.", ephemeral=True)
+    if st.faceit_readycheck_active:
+        return await interaction.response.send_message("Faceit-readycheck käynnissä – ei uusia liittymisiä.", ephemeral=True)
     added = await bot.db.faceit_add(guild_id, uid)
     if not added:
         return await interaction.response.send_message("Olet jo faceit-jonossa.", ephemeral=True)
@@ -2103,16 +2289,27 @@ async def faceit_cmd(interaction: discord.Interaction):
         f"{mention(uid)} haluaa pelata faceittia! ({len(queue)}/{FACEIT_QUEUE_SIZE})"
     )
 
-    if len(queue) >= FACEIT_QUEUE_SIZE:
-        await bot.db.faceit_clear(guild_id)
+    if len(queue) >= FACEIT_QUEUE_SIZE and not st.faceit_readycheck_active:
+        st.faceit_readycheck_active = True
+        st.faceit_ready_users = set()
+        st.faceit_ready_users.add(uid)
         mentions = " ".join(mention(u) for u in queue)
+        view = FaceitReadyCheckButton(bot, guild_id)
         await interaction.followup.send(
-            f"**Faceit-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+            f"**Faceit-jonossa {FACEIT_QUEUE_SIZE} pelaajaa!** Readycheck alkaa nyt ({READYCHECK_SECONDS}s).\n"
+            f"{mentions}\n"
+            f"Klikkaa nappia tai kirjoita **!fr** ollaksesi mukana faceit-pelissä!",
+            view=view
         )
+        await start_faceit_ready_timer(interaction, st)
+        st.faceit_ready_task = asyncio.create_task(faceit_ready_timeout_run(interaction, st))
 
 @bot.tree.command(name="faceitrm", description="Poistu faceit-jonosta")
 async def faceitrm_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
+    st = bot.get_state(interaction.guild_id)
+    if st.faceit_readycheck_active:
+        return await interaction.response.send_message("Faceit-readycheck käynnissä – poistuminen ei juuri nyt onnistu.", ephemeral=True)
     removed = await bot.db.faceit_remove(interaction.guild_id, interaction.user.id)
     if removed:
         return await interaction.response.send_message("Poistuttu faceit-jonosta.")
@@ -2121,7 +2318,17 @@ async def faceitrm_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="faceitreset", description="Tyhjennä faceit-jono")
 async def faceitreset_cmd(interaction: discord.Interaction):
     assert interaction.guild_id
+    st = bot.get_state(interaction.guild_id)
     await bot.db.faceit_clear(interaction.guild_id)
+    st.faceit_readycheck_active = False
+    st.faceit_ready_users.clear()
+    if st.faceit_ready_task and not st.faceit_ready_task.done():
+        st.faceit_ready_task.cancel()
+    st.faceit_ready_task = None
+    if st.faceit_rc_timer_task and not st.faceit_rc_timer_task.done():
+        st.faceit_rc_timer_task.cancel()
+    st.faceit_rc_timer_task = None
+    st.faceit_rc_timer_msg = None
     await interaction.response.send_message("Faceit-jono nollattu.")
 
 @bot.tree.command(name="molemmat", description="Liity sekä draft- että faceit-jonoon")
@@ -2150,21 +2357,36 @@ async def molemmat_cmd(interaction: discord.Interaction):
         if len(st.queue) >= QUEUE_SIZE and not st.readycheck_active:
             trigger_readycheck = True
 
-    faceit_added = await bot.db.faceit_add(guild_id, uid)
-    faceit_queue = await bot.db.faceit_list(guild_id)
-    if faceit_added:
-        lines.append(f"{mention(uid)} haluaa pelata faceittia! ({len(faceit_queue)}/{FACEIT_QUEUE_SIZE})")
+    trigger_faceit_readycheck = False
+    if st.faceit_readycheck_active:
+        lines.append("Faceit-readycheck käynnissä – ei uusia liittymisiä faceit-jonoon.")
+        faceit_queue = await bot.db.faceit_list(guild_id)
     else:
-        lines.append("Olet jo faceit-jonossa.")
+        faceit_added = await bot.db.faceit_add(guild_id, uid)
+        faceit_queue = await bot.db.faceit_list(guild_id)
+        if faceit_added:
+            lines.append(f"{mention(uid)} haluaa pelata faceittia! ({len(faceit_queue)}/{FACEIT_QUEUE_SIZE})")
+        else:
+            lines.append("Olet jo faceit-jonossa.")
+        if len(faceit_queue) >= FACEIT_QUEUE_SIZE:
+            trigger_faceit_readycheck = True
 
     await interaction.response.send_message("\n".join(lines))
 
-    if len(faceit_queue) >= FACEIT_QUEUE_SIZE:
-        await bot.db.faceit_clear(guild_id)
+    if trigger_faceit_readycheck:
+        st.faceit_readycheck_active = True
+        st.faceit_ready_users = set()
+        st.faceit_ready_users.add(uid)
         mentions = " ".join(mention(u) for u in faceit_queue)
+        view = FaceitReadyCheckButton(bot, guild_id)
         await interaction.followup.send(
-            f"**Faceit-tiimi täynnä!** {mentions}\nViisikko on koossa, homma pystyyn!"
+            f"**Faceit-jonossa {FACEIT_QUEUE_SIZE} pelaajaa!** Readycheck alkaa nyt ({READYCHECK_SECONDS}s).\n"
+            f"{mentions}\n"
+            f"Klikkaa nappia tai kirjoita **!fr** ollaksesi mukana faceit-pelissä!",
+            view=view
         )
+        await start_faceit_ready_timer(interaction, st)
+        st.faceit_ready_task = asyncio.create_task(faceit_ready_timeout_run(interaction, st))
 
     if trigger_readycheck:
         st.readycheck_active = True
@@ -2200,6 +2422,7 @@ async def komennot_cmd(interaction: discord.Interaction):
         value=(
             "`/faceit` — Ilmoittaudu seuraavaan faceit-peliin (max 5)\n"
             "`/faceitrm` — Poistu faceit-jonosta\n"
+            "`/fr` — Merkitse itsesi valmiiksi (faceit-readycheck)\n"
             "`/faceitreset` — Tyhjennä faceit-jono\n"
             "`/molemmat` — Liity sekä draft- että faceit-jonoon"
         ),
@@ -2273,6 +2496,30 @@ async def r_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=False)
 
     await start_draft(interaction)
+
+@bot.tree.command(name="fr", description="Merkitse itsesi valmiiksi faceit-readycheckissä")
+async def fr_cmd(interaction: discord.Interaction):
+    assert interaction.guild_id
+    st = bot.get_state(interaction.guild_id)
+    if not st.faceit_readycheck_active:
+        return await interaction.response.send_message("Faceit-readycheck ei ole käynnissä.", ephemeral=True)
+
+    queue = await bot.db.faceit_list(interaction.guild_id)
+    if interaction.user.id not in queue:
+        return await interaction.response.send_message("Et ole faceit-jonossa.", ephemeral=True)
+
+    if interaction.user.id in st.faceit_ready_users:
+        return await interaction.response.send_message("Olet jo merkinnyt itsesi valmiiksi!", ephemeral=True)
+
+    st.faceit_ready_users.add(interaction.user.id)
+    left = FACEIT_QUEUE_SIZE - len(st.faceit_ready_users)
+
+    if left > 0:
+        return await interaction.response.send_message(f"Merkitty valmiiksi. Odotetaan vielä {left} pelaajaa…")
+
+    await interaction.response.defer(thinking=False)
+
+    await finish_faceit_readycheck(interaction, st)
 
 async def start_draft(interaction: discord.Interaction):
     assert interaction.guild_id
@@ -3373,7 +3620,7 @@ async def faceit_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await faceit_cmd.callback(interaction)
 
-@bot.command(name="faceitrm", aliases=["faceitpois", "poisfaceit", "premrm", "rmp"])
+@bot.command(name="faceitrm", aliases=["faceitpois", "poisfaceit", "premrm", "rmp", "rmf", "frm"])
 async def faceitrm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await faceitrm_cmd.callback(interaction)
@@ -3397,6 +3644,11 @@ async def komennot_bang(ctx: commands.Context):
 async def r_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await r_cmd.callback(interaction)
+
+@bot.command(name="fr", aliases=["readyf", "rf", "valmisfaceit"])
+async def fr_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await fr_cmd.callback(interaction)
 
 @bot.command(name="reset")
 async def reset_bang(ctx: commands.Context):
@@ -3551,7 +3803,7 @@ async def nightly_queue_reset():
     for guild in bot.guilds:
         st = bot.get_state(guild.id)
         faceit_queue = await bot.db.faceit_list(guild.id)
-        had_queue = bool(st.queue) or bool(st.readycheck_active) or bool(faceit_queue)
+        had_queue = bool(st.queue) or bool(st.readycheck_active) or bool(faceit_queue) or bool(st.faceit_readycheck_active)
         channel = None
         if st.last_channel_id:
             channel = guild.get_channel(st.last_channel_id)
@@ -3566,6 +3818,17 @@ async def nightly_queue_reset():
         if st.ready_task and not st.ready_task.done():
             st.ready_task.cancel()
         st.ready_task = None
+
+        st.faceit_readycheck_active = False
+        st.faceit_ready_users.clear()
+        if st.faceit_ready_task and not st.faceit_ready_task.done():
+            st.faceit_ready_task.cancel()
+        st.faceit_ready_task = None
+        if st.faceit_rc_timer_task and not st.faceit_rc_timer_task.done():
+            st.faceit_rc_timer_task.cancel()
+        st.faceit_rc_timer_task = None
+        st.faceit_rc_timer_msg = None
+
         await bot.db.queue_clear(guild.id)
         await bot.db.faceit_clear(guild.id)
 

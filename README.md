@@ -10,6 +10,7 @@ A feature-rich Discord bot for organizing Counter-Strike draft matches with auto
 A simple Discord bot for organizing CS2 inhouse matches with:
 
 - Automated queue, readycheck, and captain draft flow
+- Faceit queue for gathering a 5-stack ahead of the next Faceit match
 - Player stats tracking (wins, captain picks, first/last pick counts)
 - Pick turn breakdowns with average pick round stats
 - Elo ratings with leaderboards
@@ -45,6 +46,7 @@ Key settings in `main.py`:
 
 ```python
 QUEUE_SIZE = 10                    # Players needed for a draft
+FACEIT_QUEUE_SIZE = 5              # Players needed for a Faceit 5-stack
 READYCHECK_SECONDS = 120           # Readycheck timeout (2 minutes)
 PICK_TIMEOUT_SECONDS = 45          # Captain pick timeout
 AUTO_VOICE_CHANNELS = True         # Enable automatic voice channel moves
@@ -60,11 +62,17 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/add` | `!add`, `!dad`, `!ad`, etc. | Join the draft queue |
 | `/rm` | `!rm`, `!remove` | Leave the queue |
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
+| `/faceit` | `!faceit`, `!prem`, `!faceite`, `!premjono` | Join the Faceit queue (next 5-stack) |
+| `/faceitrm` | `!faceitrm`, `!faceitpois`, `!poisfaceit`, `!premrm`, `!rmp`, `!rmf`, `!frm`, `!faceitremove`, `!removefaceit`, `!rmfaceit`, `!faceitleave`, `!leavefaceit`, `!faceitpoistu`, `!poistufaceit`, `!faceitnvm`, `!nvmfaceit`, `!fnvm`, `!fpois`, `!prempois`, `!premremove` | Leave the Faceit queue |
+| `/fr` | `!fr`, `!readyf`, `!rf`, `!valmisfaceit` | Ready up during Faceit readycheck (or click button) |
+| `/faceitreset` | `!faceitreset`, `!premreset`, `!faceitclear`, `!resetfaceit`, `!preset` | Clear the Faceit queue |
+| `/molemmat` | `!molemmat`, `!both`, `!kaikki`, `!addboth`, `!molempiin` | Join both the draft queue and the Faceit queue (if already in both, leaves both) |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
 | `/pickstats [user]` | `!pickstats` | View pick turn counts and average pick round |
 | `/winrate <user>` | `!winrate`, `!wr` | Compare your winrate against another player |
 | `/elo [user]` | `!elo` | View Elo rating and ranking |
 | `/dstatus` | `!dstatus` | Check current queue/draft status |
+| `/komennot` | `!komennot`, `!commands`, `!cmds` | List all bot commands |
 | `/pick <number>` | `!pick`, `!p` | Captain: Pick a player by number |
 | `/nocaptain` | `!nocaptain` | Opt out of being randomly selected as captain |
 | `/allowcaptain` | `!allowcaptain` | Re-allow captain selection |
@@ -142,6 +150,10 @@ Players have 120 seconds to click the ready button or type `/r`. Players who don
 - Stats are updated automatically
 - Players moved back to lobby voice channel after 15 seconds
 
+## Flow for Faceit queue
+
+Separate from the regular draft queue above. Players use `/faceit` to signal interest in the next Faceit match; each join posts its own message showing progress (e.g. "2/5"). Once 5 players have joined, a readycheck starts automatically, just like the draft queue: players have `READYCHECK_SECONDS` (120s by default) to click the ready button or type `/fr`. If everyone readies up, the queue is cleared automatically and everyone is pinged, ready to fill up again for the following match. Players who don't ready up in time are removed from the Faceit queue, and the remaining ready players stay queued for the next join. No one can join or leave the Faceit queue while a readycheck is in progress. Use `/faceitrm` to leave if plans change, or `/faceitreset` to manually clear the queue and cancel any active readycheck (available to everyone). Use `/molemmat` to join both the draft and Faceit queues in one command.
+
 ## Database Schema
 
 The bot uses SQLite with the following tables:
@@ -183,6 +195,13 @@ The bot uses SQLite with the following tables:
 ### captain_opt_out
 
 - `user_id` - Discord user ID (primary key)
+
+### faceit_queue
+
+- `guild_id` - Discord server ID
+- `user_id` - Discord user ID
+- `joined_at` - Timestamp
+- Primary key: `(guild_id, user_id)`
 
 Database file: `draftbot.sqlite3`
 Backups: `backups/` directory (last 10 kept)

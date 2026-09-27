@@ -63,10 +63,10 @@ EMBED_COLOR_PRIMARY = 0x29377e     # Embed color (hex)
 | `/rm` | `!rm`, `!remove` | Leave the queue |
 | `/r` | `!r`, `!ready` | Ready up during readycheck (or click button) |
 | `/faceit` | `!faceit`, `!prem`, `!faceite`, `!premjono` | Join the Faceit queue (next 5-stack) |
-| `/faceitrm` | `!faceitrm`, `!faceitpois`, `!poisfaceit`, `!premrm`, `!rmp`, `!rmf`, `!frm` | Leave the Faceit queue |
+| `/faceitrm` | `!faceitrm`, `!faceitpois`, `!poisfaceit`, `!premrm`, `!rmp`, `!rmf`, `!frm`, `!faceitremove`, `!removefaceit`, `!rmfaceit`, `!faceitleave`, `!leavefaceit`, `!faceitpoistu`, `!poistufaceit`, `!faceitnvm`, `!nvmfaceit`, `!fnvm`, `!fpois`, `!prempois`, `!premremove` | Leave the Faceit queue |
 | `/fr` | `!fr`, `!readyf`, `!rf`, `!valmisfaceit` | Ready up during Faceit readycheck (or click button) |
 | `/faceitreset` | `!faceitreset`, `!premreset`, `!faceitclear`, `!resetfaceit`, `!preset` | Clear the Faceit queue |
-| `/molemmat` | `!molemmat`, `!both`, `!kaikki`, `!addboth`, `!molempiin` | Join both the draft queue and the Faceit queue |
+| `/molemmat` | `!molemmat`, `!both`, `!kaikki`, `!addboth`, `!molempiin` | Join both the draft queue and the Faceit queue (if already in both, leaves both) |
 | `/pstats [user]` | `!pstats` | View player statistics and rankings |
 | `/pickstats [user]` | `!pickstats` | View pick turn counts and average pick round |
 | `/winrate <user>` | `!winrate`, `!wr` | Compare your winrate against another player |

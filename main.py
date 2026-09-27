@@ -2266,7 +2266,7 @@ async def rm_cmd(interaction: discord.Interaction):
         st.queue.remove(uid)
         st.queue_joined_at.pop(uid, None)
         await sync_queue_db(interaction.guild_id, st)
-        return await interaction.response.send_message("Poistuttu jonosta.")
+        return await interaction.response.send_message(f"Poistuttu jonosta. Pelaajia jonossa: {len(st.queue)}/{QUEUE_SIZE}")
     return await interaction.response.send_message("Et ole jonossa tai poistuminen ei juuri nyt onnistu.", ephemeral=True)
 
 @bot.tree.command(name="faceit", description="Ilmoittaudu kiinnostuneeksi seuraavasta faceit-pelistä")
@@ -2312,7 +2312,10 @@ async def faceitrm_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Faceit-readycheck käynnissä – poistuminen ei juuri nyt onnistu.", ephemeral=True)
     removed = await bot.db.faceit_remove(interaction.guild_id, interaction.user.id)
     if removed:
-        return await interaction.response.send_message("Poistuttu faceit-jonosta.")
+        queue = await bot.db.faceit_list(interaction.guild_id)
+        return await interaction.response.send_message(
+            f"{mention(interaction.user.id)} poistui faceit-jonosta. ({len(queue)}/{FACEIT_QUEUE_SIZE})"
+        )
     return await interaction.response.send_message("Et ole faceit-jonossa.", ephemeral=True)
 
 @bot.tree.command(name="faceitreset", description="Tyhjennä faceit-jono")
@@ -2331,12 +2334,51 @@ async def faceitreset_cmd(interaction: discord.Interaction):
     st.faceit_rc_timer_msg = None
     await interaction.response.send_message("Faceit-jono nollattu.")
 
-@bot.tree.command(name="molemmat", description="Liity sekä draft- että faceit-jonoon")
-async def molemmat_cmd(interaction: discord.Interaction):
+POISTU_KEYWORDS = {"poistu", "pois", "rm", "remove", "leave"}
+
+async def molemmat_leave(interaction: discord.Interaction, st, guild_id: int, uid: int):
+    lines = []
+
+    if uid in st.queue and not st.readycheck_active and not st.draft_active:
+        st.queue.remove(uid)
+        st.queue_joined_at.pop(uid, None)
+        await sync_queue_db(guild_id, st)
+        lines.append(f"Poistuttu jonosta. Pelaajia jonossa: {len(st.queue)}/{QUEUE_SIZE}")
+    elif uid in st.queue:
+        lines.append("Poistuminen jonosta ei juuri nyt onnistu (draft tai readycheck käynnissä).")
+    else:
+        lines.append("Et ollut jonossa.")
+
+    if st.faceit_readycheck_active:
+        lines.append("Poistuminen faceit-jonosta ei juuri nyt onnistu (faceit-readycheck käynnissä).")
+    else:
+        removed = await bot.db.faceit_remove(guild_id, uid)
+        if removed:
+            faceit_queue = await bot.db.faceit_list(guild_id)
+            lines.append(f"{mention(uid)} poistui faceit-jonosta. ({len(faceit_queue)}/{FACEIT_QUEUE_SIZE})")
+        else:
+            lines.append("Et ollut faceit-jonossa.")
+
+    await interaction.response.send_message("\n".join(lines))
+
+@bot.tree.command(name="molemmat", description="Liity tai poistu sekä draft- että faceit-jonosta")
+@app_commands.describe(action="Liity molempiin jonoihin vai poistu molemmista (oletus: liity)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Liity molempiin", value="liity"),
+    app_commands.Choice(name="Poistu molemmista", value="poistu"),
+])
+async def molemmat_cmd(interaction: discord.Interaction, action: Optional[str] = "liity"):
     assert interaction.guild_id
     guild_id = interaction.guild_id
     st = bot.get_state(guild_id)
     uid = interaction.user.id
+
+    if action and action.lower() in POISTU_KEYWORDS:
+        return await molemmat_leave(interaction, st, guild_id, uid)
+
+    # Toggle: jos on jo molemmissa jonoissa, poistetaan molemmista
+    if uid in st.queue and uid in await bot.db.faceit_list(guild_id):
+        return await molemmat_leave(interaction, st, guild_id, uid)
 
     if await bot.db.is_game_banned(uid):
         return await interaction.response.send_message("Olet pelikiellossa etkä voi liittyä jonoihin.", ephemeral=True)
@@ -2424,7 +2466,8 @@ async def komennot_cmd(interaction: discord.Interaction):
             "`/faceitrm` — Poistu faceit-jonosta\n"
             "`/fr` — Merkitse itsesi valmiiksi (faceit-readycheck)\n"
             "`/faceitreset` — Tyhjennä faceit-jono\n"
-            "`/molemmat` — Liity sekä draft- että faceit-jonoon"
+            "`/molemmat` — Liity sekä draft- että faceit-jonoon (jos olet jo molemmissa, poistaa molemmista)\n"
+            "`/molemmat poistu` (`!molemmatrm`) — Poistu molemmista jonoista"
         ),
         inline=False,
     )
@@ -3620,7 +3663,7 @@ async def faceit_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await faceit_cmd.callback(interaction)
 
-@bot.command(name="faceitrm", aliases=["faceitpois", "poisfaceit", "premrm", "rmp", "rmf", "frm"])
+@bot.command(name="faceitrm", aliases=["faceitpois", "poisfaceit", "premrm", "rmp", "rmf", "frm", "faceitremove", "removefaceit", "rmfaceit", "faceitleave", "leavefaceit", "faceitpoistu", "poistufaceit", "faceitnvm", "nvmfaceit", "fnvm", "fpois", "prempois", "premremove"])
 async def faceitrm_bang(ctx: commands.Context):
     interaction = InteractionShim(ctx)
     await faceitrm_cmd.callback(interaction)
@@ -3631,9 +3674,14 @@ async def faceitreset_bang(ctx: commands.Context):
     await faceitreset_cmd.callback(interaction)
 
 @bot.command(name="molemmat", aliases=["both", "kaikki", "addboth", "molempiin"])
-async def molemmat_bang(ctx: commands.Context):
+async def molemmat_bang(ctx: commands.Context, action: Optional[str] = "liity"):
     interaction = InteractionShim(ctx)
-    await molemmat_cmd.callback(interaction)
+    await molemmat_cmd.callback(interaction, action)
+
+@bot.command(name="molemmatrm", aliases=["molemmatpois", "poismolemmat", "bothrm", "rmboth"])
+async def molemmatrm_bang(ctx: commands.Context):
+    interaction = InteractionShim(ctx)
+    await molemmat_cmd.callback(interaction, "poistu")
 
 @bot.command(name="komennot", aliases=["komennnot", "commands", "cmds"])
 async def komennot_bang(ctx: commands.Context):
